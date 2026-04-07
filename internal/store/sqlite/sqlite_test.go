@@ -11,7 +11,7 @@ import (
 func TestOpenUsesDefaultDSNAndReturnsStore(t *testing.T) {
 	store, db, err := Open(context.Background(), config.DatabaseConfig{
 		ConnTimeout: time.Second,
-	})
+	}, config.SearchConfig{DefaultLimit: 20, MaxLimit: 100})
 	if err != nil {
 		t.Fatalf("open sqlite store: %v", err)
 	}

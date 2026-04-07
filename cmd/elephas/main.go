@@ -5,9 +5,9 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log"
 	"log/slog"
 	"net/http"
+	"os"
 	"os/signal"
 	"syscall"
 	"time"
@@ -25,12 +25,14 @@ import (
 )
 
 func main() {
+	logger := observability.NewLogger(slog.LevelInfo)
+	slog.SetDefault(logger)
+
 	cfg, err := config.Load()
 	if err != nil {
-		log.Fatalf("load config: %v", err)
+		fatalBootstrap(logger, "load config", err, os.Exit)
 	}
 
-	logger := observability.NewLogger(slog.LevelInfo)
 	logger.Info("starting elephas", "component", "bootstrap", "backend", cfg.DB.Backend)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -38,12 +40,12 @@ func main() {
 
 	store, db, err := openStore(ctx, cfg)
 	if err != nil {
-		log.Fatalf("open store: %v", err)
+		fatalBootstrap(logger, "open store", err, os.Exit)
 	}
 	defer db.Close()
 
 	if err := migrate.NewRunner(db, cfg.DB.Backend).Run(ctx); err != nil {
-		log.Fatalf("run migrations: %v", err)
+		fatalBootstrap(logger, "run migrations", err, os.Exit)
 	}
 
 	serviceOptions := []elephas.ServiceOption{
@@ -65,7 +67,7 @@ func main() {
 	if cfg.Cache.DSN != "" {
 		cache, err := rediscache.New(ctx, cfg.Cache.DSN, cfg.Cache.TTL)
 		if err != nil {
-			log.Fatalf("open redis cache: %v", err)
+			fatalBootstrap(logger, "open redis cache", err, os.Exit)
 		}
 		serviceOptions = append(serviceOptions, elephas.WithContextCache(cache))
 	}
@@ -95,20 +97,24 @@ func main() {
 	}()
 
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		logger.Error("server failed", "component", "bootstrap", "error", err)
-		log.Fatalf("listen and serve: %v", err)
+		fatalBootstrap(logger, "listen and serve", err, os.Exit)
 	}
 }
 
 func openStore(ctx context.Context, cfg config.Config) (elephas.Store, *sql.DB, error) {
 	switch cfg.DB.Backend {
 	case "postgres":
-		return postgres.Open(ctx, cfg.DB)
+		return postgres.Open(ctx, cfg.DB, cfg.Search)
 	case "sqlite":
-		return sqlite.Open(ctx, cfg.DB)
+		return sqlite.Open(ctx, cfg.DB, cfg.Search)
 	case "age":
-		return age.Open(ctx, cfg.DB)
+		return age.Open(ctx, cfg.DB, cfg.Search)
 	default:
 		return nil, nil, fmt.Errorf("unsupported backend %q", cfg.DB.Backend)
 	}
+}
+
+func fatalBootstrap(logger *slog.Logger, action string, err error, exit func(int)) {
+	logger.Error(action, "component", "bootstrap", "error", err)
+	exit(1)
 }

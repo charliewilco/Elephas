@@ -308,7 +308,58 @@ func TestSQLiteStoreTransactionsFiltersAndNotFounds(t *testing.T) {
 	}
 }
 
+func TestSQLiteStoreAppliesConfiguredSearchLimits(t *testing.T) {
+	store, cleanup := newSQLiteStoreWithOptions(t, WithSearchLimits(2, 3))
+	defer cleanup()
+
+	ctx := context.Background()
+	entity, err := store.CreateEntity(ctx, elephas.CreateEntityParams{Name: "Charlie", Type: elephas.EntityTypePerson})
+	if err != nil {
+		t.Fatalf("create entity: %v", err)
+	}
+
+	for i := 0; i < 4; i++ {
+		_, err := store.CreateMemory(ctx, elephas.CreateMemoryParams{
+			EntityID:   entity.ID,
+			Content:    "Prefers light mode",
+			Category:   elephas.MemoryCategoryPreference,
+			Confidence: 1,
+		})
+		if err != nil {
+			t.Fatalf("create memory %d: %v", i, err)
+		}
+	}
+
+	defaultLimited, err := store.SearchMemories(ctx, elephas.SearchQuery{Query: "light"})
+	if err != nil {
+		t.Fatalf("search with default limit: %v", err)
+	}
+	if len(defaultLimited) != 2 {
+		t.Fatalf("expected configured default search limit of 2, got %d", len(defaultLimited))
+	}
+
+	maxLimited, err := store.SearchMemories(ctx, elephas.SearchQuery{Query: "light", Limit: 10})
+	if err != nil {
+		t.Fatalf("search with capped limit: %v", err)
+	}
+	if len(maxLimited) != 3 {
+		t.Fatalf("expected configured max search limit of 3, got %d", len(maxLimited))
+	}
+
+	inRange, err := store.SearchMemories(ctx, elephas.SearchQuery{Query: "light", Limit: 1})
+	if err != nil {
+		t.Fatalf("search with explicit in-range limit: %v", err)
+	}
+	if len(inRange) != 1 {
+		t.Fatalf("expected explicit search limit to be preserved, got %d", len(inRange))
+	}
+}
+
 func newSQLiteStore(t *testing.T) (*Store, func()) {
+	return newSQLiteStoreWithOptions(t)
+}
+
+func newSQLiteStoreWithOptions(t *testing.T, opts ...Option) (*Store, func()) {
 	t.Helper()
 
 	db, err := sql.Open("sqlite", "file:"+t.Name()+"?mode=memory&cache=shared")
@@ -321,7 +372,7 @@ func newSQLiteStore(t *testing.T) (*Store, func()) {
 	if err := migrate.NewRunner(db, "sqlite").Run(context.Background()); err != nil {
 		t.Fatalf("run migrations: %v", err)
 	}
-	store := New(db, "sqlite")
+	store := New(db, "sqlite", opts...)
 	return store, func() { _ = store.Close() }
 }
 

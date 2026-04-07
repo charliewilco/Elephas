@@ -107,9 +107,37 @@ func TestConfigValidateRejectsBadValues(t *testing.T) {
 			name: "threshold too low",
 			cfg: Config{
 				DB:      DatabaseConfig{Backend: "sqlite"},
+				Search:  SearchConfig{DefaultLimit: 20, MaxLimit: 100},
 				Resolve: ResolveConfig{Threshold: 0},
 			},
 			wantErr: "ELEPHAS_RESOLVE_THRESHOLD must be between 0 and 1",
+		},
+		{
+			name: "search default limit must be positive",
+			cfg: Config{
+				DB:      DatabaseConfig{Backend: "sqlite"},
+				Search:  SearchConfig{DefaultLimit: 0, MaxLimit: 100},
+				Resolve: ResolveConfig{Threshold: 0.85},
+			},
+			wantErr: "ELEPHAS_SEARCH_DEFAULT_LIMIT must be greater than 0",
+		},
+		{
+			name: "search max limit must be positive",
+			cfg: Config{
+				DB:      DatabaseConfig{Backend: "sqlite"},
+				Search:  SearchConfig{DefaultLimit: 20, MaxLimit: 0},
+				Resolve: ResolveConfig{Threshold: 0.85},
+			},
+			wantErr: "ELEPHAS_SEARCH_MAX_LIMIT must be greater than 0",
+		},
+		{
+			name: "search default limit must not exceed max",
+			cfg: Config{
+				DB:      DatabaseConfig{Backend: "sqlite"},
+				Search:  SearchConfig{DefaultLimit: 101, MaxLimit: 100},
+				Resolve: ResolveConfig{Threshold: 0.85},
+			},
+			wantErr: "ELEPHAS_SEARCH_DEFAULT_LIMIT must be less than or equal to ELEPHAS_SEARCH_MAX_LIMIT",
 		},
 	}
 
@@ -139,5 +167,27 @@ func TestLoadDefaultsSQLiteDSNWhenEmpty(t *testing.T) {
 	}
 	if cfg.DB.ConnTimeout != 5*time.Second {
 		t.Fatalf("expected default timeout, got %v", cfg.DB.ConnTimeout)
+	}
+}
+
+func TestLoadReadsSearchLimitOverrides(t *testing.T) {
+	t.Setenv("ELEPHAS_DB_BACKEND", "sqlite")
+	t.Setenv("ELEPHAS_DB_DSN", ":memory:")
+	t.Setenv("ELEPHAS_SEARCH_DEFAULT_LIMIT", "7")
+	t.Setenv("ELEPHAS_SEARCH_MAX_LIMIT", "15")
+	t.Setenv("ELEPHAS_RESOLVE_THRESHOLD", "0.85")
+	t.Setenv("ELEPHAS_EXTRACTOR_ENDPOINT", "")
+	t.Setenv("ELEPHAS_EXTRACTOR_API_KEY", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	if cfg.Search.DefaultLimit != 7 {
+		t.Fatalf("expected search default limit override, got %d", cfg.Search.DefaultLimit)
+	}
+	if cfg.Search.MaxLimit != 15 {
+		t.Fatalf("expected search max limit override, got %d", cfg.Search.MaxLimit)
 	}
 }

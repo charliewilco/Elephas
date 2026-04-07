@@ -12,7 +12,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-func Open(ctx context.Context, cfg config.DatabaseConfig) (elephas.Store, *sql.DB, error) {
+func Open(ctx context.Context, cfg config.DatabaseConfig, searchCfg config.SearchConfig) (elephas.Store, *sql.DB, error) {
 	dsn := cfg.DSN
 	if dsn == "" {
 		dsn = "file:elephas.db"
@@ -41,5 +41,9 @@ func Open(ctx context.Context, cfg config.DatabaseConfig) (elephas.Store, *sql.D
 		return nil, nil, err
 	}
 
-	return sqlstore.New(db, "sqlite"), db, nil
+	return sqlstore.New(
+		db,
+		"sqlite",
+		sqlstore.WithSearchLimits(searchCfg.DefaultLimit, searchCfg.MaxLimit),
+	), db, nil
 }

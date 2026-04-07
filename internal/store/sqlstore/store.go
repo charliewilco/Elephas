@@ -13,17 +13,19 @@ import (
 	"github.com/google/uuid"
 )
 
-type dbRunner interface {
+type Runner interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
 type Store struct {
-	db      *sql.DB
-	runner  dbRunner
-	backend string
-	closeDB bool
+	db                 *sql.DB
+	runner             Runner
+	backend            string
+	closeDB            bool
+	searchDefaultLimit int
+	searchMaxLimit     int
 }
 
 type predecessor struct {
@@ -31,13 +33,42 @@ type predecessor struct {
 	relationship elephas.Relationship
 }
 
-func New(db *sql.DB, backend string) *Store {
-	return &Store{
-		db:      db,
-		runner:  db,
-		backend: backend,
-		closeDB: true,
+const (
+	defaultSearchDefaultLimit = 20
+	defaultSearchMaxLimit     = 100
+)
+
+type Option func(*Store)
+
+func WithSearchLimits(defaultLimit, maxLimit int) Option {
+	return func(s *Store) {
+		s.searchDefaultLimit = defaultLimit
+		s.searchMaxLimit = maxLimit
 	}
+}
+
+func New(db *sql.DB, backend string, opts ...Option) *Store {
+	return NewWithRunner(db, db, backend, true, opts...)
+}
+
+func NewWithRunner(db *sql.DB, runner Runner, backend string, closeDB bool, opts ...Option) *Store {
+	store := &Store{
+		db:                 db,
+		runner:             runner,
+		backend:            backend,
+		closeDB:            closeDB,
+		searchDefaultLimit: defaultSearchDefaultLimit,
+		searchMaxLimit:     defaultSearchMaxLimit,
+	}
+
+	for _, opt := range opts {
+		if opt != nil {
+			opt(store)
+		}
+	}
+
+	store.searchDefaultLimit, store.searchMaxLimit = normalizeSearchLimits(store.searchDefaultLimit, store.searchMaxLimit)
+	return store
 }
 
 func (s *Store) Ping(ctx context.Context) error {
@@ -57,12 +88,13 @@ func (s *Store) RunInTx(ctx context.Context, fn func(context.Context, elephas.St
 		return elephas.WrapError(elephas.ErrorCodeStore, "begin transaction", err, nil)
 	}
 
-	child := &Store{
-		db:      s.db,
-		runner:  tx,
-		backend: s.backend,
-		closeDB: false,
-	}
+	child := NewWithRunner(
+		s.db,
+		tx,
+		s.backend,
+		false,
+		WithSearchLimits(s.searchDefaultLimit, s.searchMaxLimit),
+	)
 
 	if err := fn(ctx, child); err != nil {
 		_ = tx.Rollback()
@@ -629,7 +661,7 @@ func (s *Store) SearchMemories(ctx context.Context, query elephas.SearchQuery) (
 		return nil, elephas.NewError(elephas.ErrorCodeInvalidRequest, "search query cannot be empty", nil)
 	}
 
-	limit := normalizeLimit(query.Limit, 20, 100)
+	limit := normalizeLimit(query.Limit, s.searchDefaultLimit, s.searchMaxLimit)
 	sqlQuery, args := s.searchQuery(query, limit)
 	rows, err := s.runner.QueryContext(ctx, sqlQuery, args...)
 	if err != nil {
@@ -987,6 +1019,23 @@ func normalizeLimit(limit, fallback, max int) int {
 		limit = max
 	}
 	return limit
+}
+
+func normalizeSearchLimits(defaultLimit, maxLimit int) (int, int) {
+	if defaultLimit <= 0 {
+		defaultLimit = defaultSearchDefaultLimit
+	}
+	if maxLimit <= 0 {
+		maxLimit = defaultSearchMaxLimit
+	}
+	if defaultLimit > maxLimit {
+		defaultLimit = maxLimit
+	}
+	return defaultLimit, maxLimit
+}
+
+func (s *Store) SearchLimits() (int, int) {
+	return s.searchDefaultLimit, s.searchMaxLimit
 }
 
 func normalizeOffset(offset int) int {

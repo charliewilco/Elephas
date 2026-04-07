@@ -20,7 +20,7 @@ func TestAGEStoreOpensWhenDSNProvided(t *testing.T) {
 		DSN:       dsn,
 		MaxConns:  5,
 		IdleConns: 1,
-	})
+	}, config.SearchConfig{DefaultLimit: 20, MaxLimit: 100})
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -40,7 +40,7 @@ func TestOpenReturnsContextErrorQuicklyWhenCancelled(t *testing.T) {
 		DSN:       "postgres://localhost:1/postgres?sslmode=disable",
 		MaxConns:  1,
 		IdleConns: 1,
-	})
+	}, config.SearchConfig{DefaultLimit: 20, MaxLimit: 100})
 	if err == nil {
 		t.Fatalf("expected open to fail with cancelled context")
 	}

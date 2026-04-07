@@ -128,6 +128,18 @@ func (c Config) Validate() error {
 		return errors.New("ELEPHAS_RESOLVE_THRESHOLD must be between 0 and 1")
 	}
 
+	if c.Search.DefaultLimit <= 0 {
+		return errors.New("ELEPHAS_SEARCH_DEFAULT_LIMIT must be greater than 0")
+	}
+
+	if c.Search.MaxLimit <= 0 {
+		return errors.New("ELEPHAS_SEARCH_MAX_LIMIT must be greater than 0")
+	}
+
+	if c.Search.DefaultLimit > c.Search.MaxLimit {
+		return errors.New("ELEPHAS_SEARCH_DEFAULT_LIMIT must be less than or equal to ELEPHAS_SEARCH_MAX_LIMIT")
+	}
+
 	return nil
 }
 

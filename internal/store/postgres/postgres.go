@@ -11,7 +11,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
-func Open(ctx context.Context, cfg config.DatabaseConfig) (elephas.Store, *sql.DB, error) {
+func Open(ctx context.Context, cfg config.DatabaseConfig, searchCfg config.SearchConfig) (elephas.Store, *sql.DB, error) {
 	db, err := sql.Open("pgx", cfg.DSN)
 	if err != nil {
 		return nil, nil, err
@@ -23,7 +23,11 @@ func Open(ctx context.Context, cfg config.DatabaseConfig) (elephas.Store, *sql.D
 		return nil, nil, err
 	}
 
-	return sqlstore.New(db, "postgres"), db, nil
+	return sqlstore.New(
+		db,
+		"postgres",
+		sqlstore.WithSearchLimits(searchCfg.DefaultLimit, searchCfg.MaxLimit),
+	), db, nil
 }
 
 func configurePool(db *sql.DB, cfg config.DatabaseConfig) {

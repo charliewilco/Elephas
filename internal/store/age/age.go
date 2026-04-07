@@ -13,7 +13,7 @@ import (
 // Open returns a Postgres-backed store configured for AGE deployments.
 // The relational tables remain the source of truth; AGE migrations set up
 // the graph extension for deployments that want cypher-based traversal later.
-func Open(ctx context.Context, cfg config.DatabaseConfig) (elephas.Store, *sql.DB, error) {
+func Open(ctx context.Context, cfg config.DatabaseConfig, searchCfg config.SearchConfig) (elephas.Store, *sql.DB, error) {
 	db, err := sql.Open("pgx", cfg.DSN)
 	if err != nil {
 		return nil, nil, err
@@ -26,5 +26,9 @@ func Open(ctx context.Context, cfg config.DatabaseConfig) (elephas.Store, *sql.D
 		return nil, nil, err
 	}
 
-	return sqlstore.New(db, "age"), db, nil
+	return sqlstore.New(
+		db,
+		"age",
+		sqlstore.WithSearchLimits(searchCfg.DefaultLimit, searchCfg.MaxLimit),
+	), db, nil
 }
