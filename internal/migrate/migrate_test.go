@@ -54,3 +54,40 @@ func TestLoadMigrationsSkipsAGEProjectionForPostgresBackend(t *testing.T) {
 		}
 	}
 }
+
+func TestCurrentReportsWhetherMigrationsAreUpToDate(t *testing.T) {
+	db, err := sql.Open("sqlite", "file:"+t.Name()+"?mode=memory&cache=shared")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	runner := NewRunner(db, "sqlite")
+	if err := runner.Run(context.Background()); err != nil {
+		t.Fatalf("run migrations: %v", err)
+	}
+
+	current, err := runner.Current(context.Background())
+	if err != nil {
+		t.Fatalf("current after run: %v", err)
+	}
+	if !current {
+		t.Fatalf("expected migrations to be current after run")
+	}
+
+	var migrationName string
+	if err := db.QueryRow(`SELECT name FROM elephas_migrations LIMIT 1`).Scan(&migrationName); err != nil {
+		t.Fatalf("select migration: %v", err)
+	}
+	if _, err := db.Exec(`DELETE FROM elephas_migrations WHERE name = ?`, migrationName); err != nil {
+		t.Fatalf("delete migration: %v", err)
+	}
+
+	current, err = runner.Current(context.Background())
+	if err != nil {
+		t.Fatalf("current after delete: %v", err)
+	}
+	if current {
+		t.Fatalf("expected migrations to be stale after deleting an applied migration")
+	}
+}

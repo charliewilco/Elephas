@@ -37,6 +37,9 @@ func configurePool(db *sql.DB, cfg config.DatabaseConfig) {
 }
 
 func pingWithTimeout(ctx context.Context, db *sql.DB, timeout time.Duration) error {
+	if timeout <= 0 {
+		return db.PingContext(ctx)
+	}
 	pingCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	return db.PingContext(pingCtx)

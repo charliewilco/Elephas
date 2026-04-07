@@ -164,7 +164,7 @@ func (s *Service) GetEntityContext(ctx context.Context, entityID uuid.UUID, dept
 	if s.cache != nil {
 		cached, ok, err := s.cache.GetEntityContext(ctx, entityID, depth)
 		if err != nil {
-			s.logger.Warn("entity context cache read failed", "component", "cache", "entity_id", entityID.String(), "error", err)
+			s.loggerFor(ctx, "cache").Warn("entity context cache read failed", "entity_id", entityID.String(), "error", err)
 		}
 		if ok {
 			return cached, nil
@@ -178,7 +178,7 @@ func (s *Service) GetEntityContext(ctx context.Context, entityID uuid.UUID, dept
 
 	if s.cache != nil {
 		if err := s.cache.SetEntityContext(ctx, entityID, depth, result); err != nil {
-			s.logger.Warn("entity context cache write failed", "component", "cache", "entity_id", entityID.String(), "error", err)
+			s.loggerFor(ctx, "cache").Warn("entity context cache write failed", "entity_id", entityID.String(), "error", err)
 		}
 	}
 
@@ -218,7 +218,7 @@ func (s *Service) invalidateEntityContext(ctx context.Context, entityIDs ...uuid
 		}
 		seen[entityID] = struct{}{}
 		if err := s.cache.DeleteEntityContext(ctx, entityID); err != nil {
-			s.logger.Warn("entity context cache invalidation failed", "component", "cache", "entity_id", entityID.String(), "error", err)
+			s.loggerFor(ctx, "cache").Warn("entity context cache invalidation failed", "entity_id", entityID.String(), "error", err)
 		}
 	}
 }

@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"os"
 	"testing"
 	"time"
 
@@ -9,6 +10,9 @@ import (
 )
 
 func TestOpenUsesDefaultDSNAndReturnsStore(t *testing.T) {
+	_ = os.Remove("elephas.db")
+	t.Cleanup(func() { _ = os.Remove("elephas.db") })
+
 	store, db, err := Open(context.Background(), config.DatabaseConfig{
 		ConnTimeout: time.Second,
 	}, config.SearchConfig{DefaultLimit: 20, MaxLimit: 100})

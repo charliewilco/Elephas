@@ -56,12 +56,40 @@ func TestRouterAdminEndpointsAndRequestID(t *testing.T) {
 	}
 }
 
+func TestRouterReadyReturns503WhenStoreUnavailable(t *testing.T) {
+	handler, db, cleanup := newTestRouterWithDB(t, "", fakeExtractor{})
+	defer cleanup()
+
+	if err := db.Close(); err != nil {
+		t.Fatalf("close db: %v", err)
+	}
+
+	ready := serveRequest(handler, newRequest(t, http.MethodGet, "/v1/ready", nil))
+	assertErrorResponse(t, ready, http.StatusServiceUnavailable, elephas.ErrorCodeStore)
+}
+
+func TestRouterReadyReturns503WhenMigrationsAreStale(t *testing.T) {
+	handler, db, cleanup := newTestRouterWithDB(t, "", fakeExtractor{})
+	defer cleanup()
+
+	var migrationName string
+	if err := db.QueryRow("SELECT name FROM elephas_migrations LIMIT 1").Scan(&migrationName); err != nil {
+		t.Fatalf("select applied migration: %v", err)
+	}
+	if _, err := db.Exec("DELETE FROM elephas_migrations WHERE name = ?", migrationName); err != nil {
+		t.Fatalf("delete applied migration: %v", err)
+	}
+
+	ready := serveRequest(handler, newRequest(t, http.MethodGet, "/v1/ready", nil))
+	assertErrorResponse(t, ready, http.StatusServiceUnavailable, elephas.ErrorCodeStore)
+}
+
 func TestRouterAuthAndValidationFailures(t *testing.T) {
 	handler, cleanup := newTestRouter(t, "secret", fakeExtractor{})
 	defer cleanup()
 
 	unauthorized := serveRequest(handler, newRequest(t, http.MethodGet, "/v1/health", nil))
-	assertErrorResponse(t, unauthorized, http.StatusUnauthorized, elephas.ErrorCodeInvalidRequest)
+	assertErrorResponse(t, unauthorized, http.StatusBadRequest, elephas.ErrorCodeInvalidRequest)
 	if got := unauthorized.Header().Get("X-Request-ID"); got == "" {
 		t.Fatalf("expected request id to be set on unauthorized response")
 	}
@@ -330,7 +358,55 @@ func TestRouterIngestSearchContextPathAndIngestSourceLookup(t *testing.T) {
 	}
 }
 
+func TestRouterIngestRequestLoggingIncludesRequestID(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	handler, cleanup := newTestRouterWithLogger(t, "", fakeExtractor{}, logger)
+	defer cleanup()
+
+	req := newJSONRequest(t, http.MethodPost, "/v1/ingest", map[string]any{
+		"raw_text": "Charlie prefers dark mode.",
+	})
+	req.Header.Set("X-Request-ID", "request-id-123")
+
+	rr := serveRequest(handler, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected ingest request to succeed, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if got := rr.Header().Get("X-Request-ID"); got != "request-id-123" {
+		t.Fatalf("expected response request id to be preserved, got %q", got)
+	}
+
+	logOutput := buf.String()
+	if !strings.Contains(logOutput, `"component":"api"`) {
+		t.Fatalf("expected api component in request log, got %s", logOutput)
+	}
+	if !strings.Contains(logOutput, `"request_id":"request-id-123"`) {
+		t.Fatalf("expected request id in request log, got %s", logOutput)
+	}
+	if !strings.Contains(logOutput, `"path":"/v1/ingest"`) {
+		t.Fatalf("expected ingest path in request log, got %s", logOutput)
+	}
+}
+
 func newTestRouter(t *testing.T, apiKey string, extractor elephas.Extractor) (http.Handler, func()) {
+	t.Helper()
+	handler, cleanup := newTestRouterWithLogger(t, apiKey, extractor, slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	return handler, cleanup
+}
+
+func newTestRouterWithDB(t *testing.T, apiKey string, extractor elephas.Extractor) (http.Handler, *sql.DB, func()) {
+	t.Helper()
+	return newTestRouterWithLoggerAndDB(t, apiKey, extractor, slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelDebug})))
+}
+
+func newTestRouterWithLogger(t *testing.T, apiKey string, extractor elephas.Extractor, logger *slog.Logger) (http.Handler, func()) {
+	t.Helper()
+	handler, _, cleanup := newTestRouterWithLoggerAndDB(t, apiKey, extractor, logger)
+	return handler, cleanup
+}
+
+func newTestRouterWithLoggerAndDB(t *testing.T, apiKey string, extractor elephas.Extractor, logger *slog.Logger) (http.Handler, *sql.DB, func()) {
 	t.Helper()
 
 	db, err := sql.Open("sqlite", "file:"+t.Name()+"?mode=memory&cache=shared")
@@ -340,12 +416,15 @@ func newTestRouter(t *testing.T, apiKey string, extractor elephas.Extractor) (ht
 	if _, err := db.Exec("PRAGMA foreign_keys = ON"); err != nil {
 		t.Fatalf("enable foreign keys: %v", err)
 	}
-	if err := migrate.NewRunner(db, "sqlite").Run(context.Background()); err != nil {
+	runner := migrate.NewRunner(db, "sqlite")
+	if err := runner.Run(context.Background()); err != nil {
 		t.Fatalf("run migrations: %v", err)
 	}
 
 	store := sqlstore.New(db, "sqlite")
-	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	if logger == nil {
+		logger = slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	}
 	options := []elephas.ServiceOption{elephas.WithLogger(logger)}
 	if extractor != nil {
 		options = append(options, elephas.WithExtractor(extractor))
@@ -355,9 +434,10 @@ func newTestRouter(t *testing.T, apiKey string, extractor elephas.Extractor) (ht
 	cfg := config.Config{}
 	cfg.Server.APIKey = apiKey
 
-	handler := New(service, cfg, logger)
-	return handler, func() {
+	handler := New(service, cfg, logger, runner)
+	return handler, db, func() {
 		_ = service.Close()
+		_ = db.Close()
 	}
 }
 

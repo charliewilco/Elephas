@@ -1,8 +1,12 @@
 package elephas_test
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"errors"
+	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/charliewilco/elephas"
@@ -68,6 +72,9 @@ func TestServiceIngestDryRunAndCommit(t *testing.T) {
 	}
 	if len(committed.CommittedMemories) != 1 {
 		t.Fatalf("expected one committed memory, got %d", len(committed.CommittedMemories))
+	}
+	if committed.CommittedMemories[0].SourceID == nil || *committed.CommittedMemories[0].SourceID != *committed.IngestSourceID {
+		t.Fatalf("expected committed memory to be linked to the recorded ingest source")
 	}
 
 	contextValue, err := service.GetEntityContext(context.Background(), subject.ID, 1)
@@ -290,6 +297,149 @@ func TestServiceIngestRejectsInvalidCandidateAndMissingSubject(t *testing.T) {
 	}
 }
 
+func TestServiceIngestAuditFailureShouldNotRollbackCommittedWrites(t *testing.T) {
+	store, cleanup := newTestSQLiteStore(t)
+	defer cleanup()
+
+	subject, err := store.CreateEntity(context.Background(), elephas.CreateEntityParams{
+		Name:       "Charlie",
+		Type:       elephas.EntityTypePerson,
+		ExternalID: stringPointer("user-123"),
+	})
+	if err != nil {
+		t.Fatalf("create subject: %v", err)
+	}
+
+	service := elephas.NewService(auditCreateFailureStore{
+		Store:    store,
+		auditErr: elephas.WrapError(elephas.ErrorCodeStore, "post-commit audit failed", errors.New("audit sink unavailable"), nil),
+	}, elephas.WithExtractor(fakeExtractor{candidates: []elephas.CandidateMemory{
+		{
+			Content:    "Prefers dark mode across all applications.",
+			Category:   elephas.MemoryCategoryPreference,
+			Confidence: 0.9,
+		},
+	}}))
+
+	response, ingestErr := service.Ingest(context.Background(), elephas.IngestRequest{
+		RawText:         "Charlie prefers dark mode.",
+		SubjectEntityID: &subject.ID,
+	})
+	memories, listErr := store.ListMemories(context.Background(), elephas.MemoryFilter{
+		EntityID: &subject.ID,
+		Limit:    10,
+	})
+	if listErr != nil {
+		t.Fatalf("list memories: %v", listErr)
+	}
+	if ingestErr != nil {
+		t.Fatalf("expected ingest to succeed despite post-commit audit failure, got %v (response=%+v, committed_memories=%d)", ingestErr, response, len(memories.Data))
+	}
+	if len(memories.Data) != 1 {
+		t.Fatalf("expected committed memory to remain visible after audit failure, got %d", len(memories.Data))
+	}
+	if memories.Data[0].SourceID != nil {
+		t.Fatalf("expected audit failure before source creation to leave source_id unset")
+	}
+	if response.IngestSourceID != nil {
+		t.Fatalf("expected response to omit ingest source id when audit creation fails")
+	}
+}
+
+func TestServiceIngestLogsLifecycleAndRequestID(t *testing.T) {
+	store, cleanup := newTestSQLiteStore(t)
+	defer cleanup()
+
+	subject, err := store.CreateEntity(context.Background(), elephas.CreateEntityParams{
+		Name:       "Charlie",
+		Type:       elephas.EntityTypePerson,
+		ExternalID: stringPointer("user-123"),
+	})
+	if err != nil {
+		t.Fatalf("create subject: %v", err)
+	}
+
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	service := elephas.NewService(store,
+		elephas.WithLogger(logger),
+		elephas.WithExtractor(fakeExtractor{candidates: []elephas.CandidateMemory{{
+			Content:    "Prefers dark mode across all applications.",
+			Category:   elephas.MemoryCategoryPreference,
+			Confidence: 0.9,
+		}}},
+		),
+	)
+
+	ctx := elephas.WithRequestID(context.Background(), "req-123")
+	response, err := service.Ingest(ctx, elephas.IngestRequest{
+		RawText:         "Charlie prefers dark mode.",
+		SubjectEntityID: &subject.ID,
+	})
+	if err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	if response.IngestSourceID == nil {
+		t.Fatalf("expected ingest source id")
+	}
+
+	logOutput := logs.String()
+	for _, expected := range []string{
+		`"component":"extractor"`,
+		`"component":"resolver"`,
+		`"component":"ingest"`,
+		`"component":"store"`,
+		`"request_id":"req-123"`,
+		`"ingest_source_id":"` + response.IngestSourceID.String() + `"`,
+	} {
+		if !strings.Contains(logOutput, expected) {
+			t.Fatalf("expected log output to contain %s, got %s", expected, logOutput)
+		}
+	}
+}
+
+func TestServiceIngestLogsAuditWarningWithRequestID(t *testing.T) {
+	store, cleanup := newTestSQLiteStore(t)
+	defer cleanup()
+
+	subject, err := store.CreateEntity(context.Background(), elephas.CreateEntityParams{
+		Name: "Charlie",
+		Type: elephas.EntityTypePerson,
+	})
+	if err != nil {
+		t.Fatalf("create subject: %v", err)
+	}
+
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	service := elephas.NewService(auditCreateFailureStore{
+		Store:    store,
+		auditErr: elephas.WrapError(elephas.ErrorCodeStore, "post-commit audit failed", errors.New("audit sink unavailable"), nil),
+	}, elephas.WithLogger(logger), elephas.WithExtractor(fakeExtractor{candidates: []elephas.CandidateMemory{{
+		Content:    "Prefers dark mode across all applications.",
+		Category:   elephas.MemoryCategoryPreference,
+		Confidence: 0.9,
+	}}}))
+
+	if _, err := service.Ingest(elephas.WithRequestID(context.Background(), "req-audit"), elephas.IngestRequest{
+		RawText:         "Charlie prefers dark mode.",
+		SubjectEntityID: &subject.ID,
+	}); err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+
+	logOutput := logs.String()
+	for _, expected := range []string{
+		`"msg":"ingest audit creation failed"`,
+		`"component":"store"`,
+		`"request_id":"req-audit"`,
+	} {
+		if !strings.Contains(logOutput, expected) {
+			t.Fatalf("expected audit warning log to contain %s, got %s", expected, logOutput)
+		}
+	}
+}
+
 func newTestSQLiteStore(t *testing.T) (*sqlstore.Store, func()) {
 	t.Helper()
 
@@ -316,6 +466,15 @@ type fakeExtractor struct {
 
 func (f fakeExtractor) Extract(_ context.Context, _ elephas.ExtractRequest) ([]elephas.CandidateMemory, error) {
 	return f.candidates, f.err
+}
+
+type auditCreateFailureStore struct {
+	*sqlstore.Store
+	auditErr error
+}
+
+func (s auditCreateFailureStore) CreateIngestSource(context.Context, elephas.CreateIngestSourceParams) (elephas.IngestSource, error) {
+	return elephas.IngestSource{}, s.auditErr
 }
 
 func stringPointer(value string) *string {

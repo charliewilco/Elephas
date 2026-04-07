@@ -81,3 +81,11 @@ func (s *Service) Close() error {
 
 	return s.store.Close()
 }
+
+func (s *Service) loggerFor(ctx context.Context, component string) *slog.Logger {
+	attrs := []any{"component", component}
+	if requestID := RequestIDFromContext(ctx); requestID != "" {
+		attrs = append(attrs, "request_id", requestID)
+	}
+	return s.logger.With(attrs...)
+}

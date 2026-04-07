@@ -44,8 +44,14 @@ func main() {
 	}
 	defer db.Close()
 
-	if err := migrate.NewRunner(db, cfg.DB.Backend).Run(ctx); err != nil {
+	runner := migrate.NewRunner(db, cfg.DB.Backend)
+	if err := runner.Run(ctx); err != nil {
 		fatalBootstrap(logger, "run migrations", err, os.Exit)
+	}
+	if reconciler, ok := store.(interface{ Reconcile(context.Context) error }); ok {
+		if err := reconciler.Reconcile(ctx); err != nil {
+			fatalBootstrap(logger, "reconcile graph projection", err, os.Exit)
+		}
 	}
 
 	serviceOptions := []elephas.ServiceOption{
@@ -81,7 +87,7 @@ func main() {
 
 	server := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Server.Port),
-		Handler:           httpapi.New(service, cfg, logger),
+		Handler:           httpapi.New(service, cfg, logger, runner),
 		ReadTimeout:       cfg.Server.ReadTimeout,
 		WriteTimeout:      cfg.Server.WriteTimeout,
 		ReadHeaderTimeout: 5 * time.Second,

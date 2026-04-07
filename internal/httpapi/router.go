@@ -17,16 +17,22 @@ import (
 )
 
 type Router struct {
-	service *elephas.Service
-	config  config.Config
-	logger  *slog.Logger
+	service   *elephas.Service
+	config    config.Config
+	logger    *slog.Logger
+	readiness readinessChecker
 }
 
-func New(service *elephas.Service, cfg config.Config, logger *slog.Logger) http.Handler {
+type readinessChecker interface {
+	Current(context.Context) (bool, error)
+}
+
+func New(service *elephas.Service, cfg config.Config, logger *slog.Logger, readiness readinessChecker) http.Handler {
 	router := &Router{
-		service: service,
-		config:  cfg,
-		logger:  logger,
+		service:   service,
+		config:    cfg,
+		logger:    logger,
+		readiness: readiness,
 	}
 
 	mux := http.NewServeMux()
@@ -71,7 +77,7 @@ func (r *Router) requestID(next http.Handler) http.Handler {
 			requestID = uuid.NewString()
 		}
 		w.Header().Set("X-Request-ID", requestID)
-		next.ServeHTTP(w, req.WithContext(context.WithValue(req.Context(), requestIDKey{}, requestID)))
+		next.ServeHTTP(w, req.WithContext(elephas.WithRequestID(req.Context(), requestID)))
 	})
 }
 
@@ -84,7 +90,7 @@ func (r *Router) auth(next http.Handler) http.Handler {
 
 		token := strings.TrimPrefix(req.Header.Get("Authorization"), "Bearer ")
 		if token != r.config.Server.APIKey {
-			writeError(w, req, r.logger, http.StatusUnauthorized, elephas.NewError(elephas.ErrorCodeInvalidRequest, "missing or invalid bearer token", nil))
+			writeError(w, req, r.logger, http.StatusBadRequest, elephas.NewError(elephas.ErrorCodeInvalidRequest, "missing or invalid bearer token", nil))
 			return
 		}
 
@@ -104,7 +110,7 @@ func (r *Router) logging(next http.Handler) http.Handler {
 			"path", req.URL.Path,
 			"status", recorder.status,
 			"duration_ms", time.Since(start).Milliseconds(),
-			"request_id", requestIDFromContext(req.Context()),
+			"request_id", elephas.RequestIDFromContext(req.Context()),
 		)
 	})
 }
@@ -117,6 +123,19 @@ func (r *Router) handleReady(w http.ResponseWriter, req *http.Request) {
 	if err := r.service.Ping(req.Context()); err != nil {
 		writeError(w, req, r.logger, http.StatusServiceUnavailable, elephas.WrapError(elephas.ErrorCodeStore, "service not ready", err, nil))
 		return
+	}
+	if r.readiness != nil {
+		current, err := r.readiness.Current(req.Context())
+		if err != nil {
+			writeError(w, req, r.logger, http.StatusServiceUnavailable, elephas.WrapError(elephas.ErrorCodeStore, "service not ready", err, nil))
+			return
+		}
+		if !current {
+			writeError(w, req, r.logger, http.StatusServiceUnavailable, elephas.NewError(elephas.ErrorCodeStore, "service not ready", map[string]any{
+				"reason": "migrations_not_current",
+			}))
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 }
@@ -516,13 +535,6 @@ func (s *statusRecorder) WriteHeader(code int) {
 	s.ResponseWriter.WriteHeader(code)
 }
 
-type requestIDKey struct{}
-
-func requestIDFromContext(ctx context.Context) string {
-	value, _ := ctx.Value(requestIDKey{}).(string)
-	return value
-}
-
 func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -538,7 +550,7 @@ func writeError(w http.ResponseWriter, req *http.Request, logger *slog.Logger, s
 	logger.Error("request failed",
 		"component", "api",
 		"error", apiErr.Error(),
-		"request_id", requestIDFromContext(req.Context()),
+		"request_id", elephas.RequestIDFromContext(req.Context()),
 	)
 
 	writeJSON(w, status, map[string]any{

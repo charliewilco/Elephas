@@ -39,6 +39,11 @@ type relationshipPlan struct {
 }
 
 func (s *Service) Ingest(ctx context.Context, request IngestRequest) (IngestResponse, error) {
+	startedAt := s.now()
+	ingestLogger := s.loggerFor(ctx, "ingest")
+	extractorLogger := s.loggerFor(ctx, "extractor")
+	resolverLogger := s.loggerFor(ctx, "resolver")
+
 	if strings.TrimSpace(request.RawText) == "" {
 		return IngestResponse{}, NewError(ErrorCodeInvalidRequest, "raw_text is required", nil)
 	}
@@ -59,18 +64,54 @@ func (s *Service) Ingest(ctx context.Context, request IngestRequest) (IngestResp
 		extractRequest.SubjectEntityName = subjectEntity.Name
 	}
 
+	subjectID := explicitSubjectID(subjectEntity)
+	extractorModel := chooseString(request.ExtractorModel, extractRequest.Model)
+	extractorLogger.Info("extractor started",
+		"subject_entity_id", nullableUUIDString(subjectID),
+		"extractor_model", extractorModel,
+	)
+
 	candidates, err := s.extractor.Extract(ctx, extractRequest)
 	if err != nil {
+		extractorLogger.Error("extractor failed",
+			"subject_entity_id", nullableUUIDString(subjectID),
+			"extractor_model", extractorModel,
+			"error", err,
+		)
 		return IngestResponse{}, err
 	}
+	extractorLogger.Info("extractor completed",
+		"subject_entity_id", nullableUUIDString(subjectID),
+		"extractor_model", extractorModel,
+		"candidates", len(candidates),
+	)
+
 	if len(candidates) == 0 {
-		return IngestResponse{
+		response := IngestResponse{
 			ResolutionPlan: ResolutionPlan{Steps: []ResolutionStep{}},
-		}, nil
+		}
+		ingestLogger.Info("ingest completed",
+			"ingest_source_id", nil,
+			"subject_entity_id", nullableUUIDString(subjectID),
+			"extractor_model", extractorModel,
+			"candidates", 0,
+			"created", 0,
+			"updated", 0,
+			"merged", 0,
+			"no_op", 0,
+			"duration_ms", s.now().Sub(startedAt).Milliseconds(),
+		)
+		return response, nil
 	}
 
 	plan, err := s.buildIngestPlan(ctx, subjectEntity, candidates)
 	if err != nil {
+		resolverLogger.Error("resolution planning failed",
+			"subject_entity_id", nullableUUIDString(subjectID),
+			"extractor_model", extractorModel,
+			"candidates", len(candidates),
+			"error", err,
+		)
 		return IngestResponse{}, err
 	}
 
@@ -91,26 +132,33 @@ func (s *Service) Ingest(ctx context.Context, request IngestRequest) (IngestResp
 			response.MemoriesNoOp++
 		}
 	}
+	resolverLogger.Info("resolution plan built",
+		"subject_entity_id", nullableUUIDString(subjectID),
+		"extractor_model", extractorModel,
+		"candidates", len(candidates),
+		"created", response.MemoriesCreated,
+		"updated", response.MemoriesUpdated,
+		"merged", response.MemoriesMerged,
+		"no_op", response.MemoriesNoOp,
+	)
 
 	if request.DryRun {
+		ingestLogger.Info("ingest completed",
+			"ingest_source_id", nil,
+			"subject_entity_id", nullableUUIDString(subjectID),
+			"extractor_model", extractorModel,
+			"candidates", len(candidates),
+			"created", response.MemoriesCreated,
+			"updated", response.MemoriesUpdated,
+			"merged", response.MemoriesMerged,
+			"no_op", response.MemoriesNoOp,
+			"duration_ms", s.now().Sub(startedAt).Milliseconds(),
+		)
 		return response, nil
 	}
 
 	var committed []Memory
 	if err := s.store.RunInTx(ctx, func(ctx context.Context, tx Store) error {
-		var sourceID *uuid.UUID
-		source, err := tx.CreateIngestSource(ctx, CreateIngestSourceParams{
-			RawText:         request.RawText,
-			SubjectEntityID: explicitSubjectID(subjectEntity),
-			ExtractorModel:  chooseString(request.ExtractorModel, extractRequest.Model),
-			ResolutionPlan:  response.ResolutionPlan,
-		})
-		if err != nil {
-			return err
-		}
-		sourceID = &source.ID
-		response.IngestSourceID = sourceID
-
 		if err := createPlannedEntities(ctx, tx, plan); err != nil {
 			return err
 		}
@@ -118,16 +166,24 @@ func (s *Service) Ingest(ctx context.Context, request IngestRequest) (IngestResp
 			return err
 		}
 
-		committed, err = executePlannedMemories(ctx, tx, plan, sourceID)
+		committed, err = executePlannedMemories(ctx, tx, plan)
 		if err != nil {
 			return err
 		}
 
 		return nil
 	}); err != nil {
+		ingestLogger.Error("ingest commit failed",
+			"subject_entity_id", nullableUUIDString(subjectID),
+			"extractor_model", extractorModel,
+			"candidates", len(candidates),
+			"error", err,
+			"duration_ms", s.now().Sub(startedAt).Milliseconds(),
+		)
 		return IngestResponse{}, err
 	}
 
+	response.IngestSourceID, committed = s.auditIngest(ctx, request, subjectID, extractorModel, response.ResolutionPlan, committed)
 	response.CommittedMemories = committed
 	response.ResolutionPlan = ResolutionPlan{Steps: flattenSteps(plan.steps)}
 	response.MemoriesCreated = 0
@@ -153,6 +209,18 @@ func (s *Service) Ingest(ctx context.Context, request IngestRequest) (IngestResp
 			s.invalidateEntityContext(ctx, derefCreatedEntityID(plan.entityRefs, key))
 		}
 	}
+
+	ingestLogger.Info("ingest completed",
+		"ingest_source_id", nullableUUIDString(response.IngestSourceID),
+		"subject_entity_id", nullableUUIDString(subjectID),
+		"extractor_model", extractorModel,
+		"candidates", len(candidates),
+		"created", response.MemoriesCreated,
+		"updated", response.MemoriesUpdated,
+		"merged", response.MemoriesMerged,
+		"no_op", response.MemoriesNoOp,
+		"duration_ms", s.now().Sub(startedAt).Milliseconds(),
+	)
 
 	return response, nil
 }
@@ -421,7 +489,7 @@ func createPlannedRelationships(ctx context.Context, tx Store, plan ingestPlan) 
 	return nil
 }
 
-func executePlannedMemories(ctx context.Context, tx Store, plan ingestPlan, sourceID *uuid.UUID) ([]Memory, error) {
+func executePlannedMemories(ctx context.Context, tx Store, plan ingestPlan) ([]Memory, error) {
 	committed := make([]Memory, 0)
 	for i := range plan.steps {
 		step := &plan.steps[i]
@@ -438,7 +506,6 @@ func executePlannedMemories(ctx context.Context, tx Store, plan ingestPlan, sour
 				Content:    step.response.Candidate.Content,
 				Category:   step.response.Candidate.Category,
 				Confidence: step.response.Candidate.Confidence,
-				SourceID:   sourceID,
 				Metadata:   map[string]any{"created_via": "ingest"},
 			})
 			if err != nil {
@@ -453,7 +520,6 @@ func executePlannedMemories(ctx context.Context, tx Store, plan ingestPlan, sour
 			memory, err := tx.UpdateMemory(ctx, *step.response.TargetID, MemoryPatch{
 				Content:     stringPtr(step.response.Candidate.Content),
 				Confidence:  floatPtr(step.response.Candidate.Confidence),
-				SourceID:    sourceID,
 				SetMetadata: true,
 				Metadata:    map[string]any{"updated_via": "ingest"},
 			})
@@ -663,4 +729,53 @@ func stringPtr(value string) *string {
 
 func floatPtr(value float64) *float64 {
 	return &value
+}
+
+func (s *Service) auditIngest(ctx context.Context, request IngestRequest, subjectID *uuid.UUID, extractorModel string, plan ResolutionPlan, committed []Memory) (*uuid.UUID, []Memory) {
+	storeLogger := s.loggerFor(ctx, "store")
+	source, err := s.store.CreateIngestSource(ctx, CreateIngestSourceParams{
+		RawText:         request.RawText,
+		SubjectEntityID: subjectID,
+		ExtractorModel:  extractorModel,
+		ResolutionPlan:  plan,
+	})
+	if err != nil {
+		storeLogger.Warn("ingest audit creation failed",
+			"subject_entity_id", nullableUUIDString(subjectID),
+			"extractor_model", extractorModel,
+			"error", err,
+		)
+		return nil, committed
+	}
+
+	storeLogger.Info("ingest audit recorded",
+		"ingest_source_id", source.ID.String(),
+		"subject_entity_id", nullableUUIDString(subjectID),
+		"extractor_model", extractorModel,
+	)
+
+	audited := append([]Memory(nil), committed...)
+	for i := range audited {
+		updated, err := s.store.UpdateMemory(ctx, audited[i].ID, MemoryPatch{
+			SourceID: &source.ID,
+		})
+		if err != nil {
+			storeLogger.Warn("ingest audit backfill failed",
+				"ingest_source_id", source.ID.String(),
+				"memory_id", audited[i].ID.String(),
+				"error", err,
+			)
+			continue
+		}
+		audited[i] = updated
+	}
+
+	return &source.ID, audited
+}
+
+func nullableUUIDString(id *uuid.UUID) any {
+	if id == nil {
+		return nil
+	}
+	return id.String()
 }

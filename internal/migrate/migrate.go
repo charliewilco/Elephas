@@ -69,6 +69,25 @@ func (r *Runner) Run(ctx context.Context) error {
 	return nil
 }
 
+func (r *Runner) Current(ctx context.Context) (bool, error) {
+	entries, err := loadMigrations(r.backend)
+	if err != nil {
+		return false, err
+	}
+
+	for _, entry := range entries {
+		applied, err := r.applied(ctx, entry.name)
+		if err != nil {
+			return false, err
+		}
+		if !applied {
+			return false, nil
+		}
+	}
+
+	return true, nil
+}
+
 func loadMigrations(backend string) ([]migration, error) {
 	dir := "migrations/postgres"
 	if backend == "sqlite" {
