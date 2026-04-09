@@ -355,6 +355,112 @@ func TestSQLiteStoreAppliesConfiguredSearchLimits(t *testing.T) {
 	}
 }
 
+func TestSQLiteStoreFindPathPagesPastFirstRelationshipBatch(t *testing.T) {
+	store, cleanup := newSQLiteStore(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	root, err := store.CreateEntity(ctx, elephas.CreateEntityParams{Name: "Root", Type: elephas.EntityTypePerson})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	target, err := store.CreateEntity(ctx, elephas.CreateEntityParams{Name: "Target", Type: elephas.EntityTypePerson})
+	if err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+	if _, err := store.CreateRelationship(ctx, elephas.CreateRelationshipParams{
+		FromEntityID: root.ID,
+		ToEntityID:   target.ID,
+		Type:         "knows",
+	}); err != nil {
+		t.Fatalf("create target relationship: %v", err)
+	}
+
+	for i := 0; i < 500; i++ {
+		filler, err := store.CreateEntity(ctx, elephas.CreateEntityParams{
+			Name: "Filler " + uuid.NewString(),
+			Type: elephas.EntityTypePerson,
+		})
+		if err != nil {
+			t.Fatalf("create filler entity %d: %v", i, err)
+		}
+		if _, err := store.CreateRelationship(ctx, elephas.CreateRelationshipParams{
+			FromEntityID: root.ID,
+			ToEntityID:   filler.ID,
+			Type:         "related_to",
+		}); err != nil {
+			t.Fatalf("create filler relationship %d: %v", i, err)
+		}
+	}
+
+	path, err := store.FindPath(ctx, root.ID, target.ID, 1)
+	if err != nil {
+		t.Fatalf("find path across paged relationships: %v", err)
+	}
+	if len(path) != 2 {
+		t.Fatalf("expected direct path to target, got %d nodes", len(path))
+	}
+	if path[1].Entity.ID != target.ID {
+		t.Fatalf("expected target entity at end of path")
+	}
+}
+
+func TestSQLiteStoreGetEntityContextReturnsAllMemories(t *testing.T) {
+	store, cleanup := newSQLiteStore(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	entity, err := store.CreateEntity(ctx, elephas.CreateEntityParams{Name: "Charlie", Type: elephas.EntityTypePerson})
+	if err != nil {
+		t.Fatalf("create entity: %v", err)
+	}
+
+	for i := 0; i < 501; i++ {
+		_, err := store.CreateMemory(ctx, elephas.CreateMemoryParams{
+			EntityID:   entity.ID,
+			Content:    "Memory " + uuid.NewString(),
+			Category:   elephas.MemoryCategoryFact,
+			Confidence: 1,
+		})
+		if err != nil {
+			t.Fatalf("create memory %d: %v", i, err)
+		}
+	}
+
+	contextValue, err := store.GetEntityContext(ctx, entity.ID, 0)
+	if err != nil {
+		t.Fatalf("get entity context: %v", err)
+	}
+	if len(contextValue.Memories) != 501 {
+		t.Fatalf("expected all memories in entity context, got %d", len(contextValue.Memories))
+	}
+}
+
+func TestSQLiteStoreSearchMemoriesEscapesFTSQuerySyntax(t *testing.T) {
+	store, cleanup := newSQLiteStore(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	entity, err := store.CreateEntity(ctx, elephas.CreateEntityParams{Name: "Charlie", Type: elephas.EntityTypePerson})
+	if err != nil {
+		t.Fatalf("create entity: %v", err)
+	}
+
+	if _, err := store.CreateMemory(ctx, elephas.CreateMemoryParams{
+		EntityID:   entity.ID,
+		Content:    "Working on C++ tooling",
+		Category:   elephas.MemoryCategoryFact,
+		Confidence: 1,
+	}); err != nil {
+		t.Fatalf("create memory: %v", err)
+	}
+
+	if _, err := store.SearchMemories(ctx, elephas.SearchQuery{Query: "C++", Limit: 10}); err != nil {
+		t.Fatalf("search with FTS syntax characters: %v", err)
+	}
+}
+
 func newSQLiteStore(t *testing.T) (*Store, func()) {
 	return newSQLiteStoreWithOptions(t)
 }
