@@ -136,6 +136,36 @@ func TestServiceIngestPreferenceUpdatesExistingMemory(t *testing.T) {
 	}
 }
 
+func TestServiceIngestPropagatesLookupFailures(t *testing.T) {
+	store, cleanup := newTestSQLiteStore(t)
+	defer cleanup()
+
+	service := elephas.NewService(lookupErrorStore{
+		Store: store,
+		err:   elephas.WrapError(elephas.ErrorCodeStore, "lookup failed", errors.New("database unavailable"), nil),
+	}, elephas.WithExtractor(fakeExtractor{candidates: []elephas.CandidateMemory{{
+		Content:    "Prefers dark mode across all applications.",
+		Category:   elephas.MemoryCategoryPreference,
+		Confidence: 0.9,
+		Subject: &elephas.CandidateEntity{
+			Name: "Charlie",
+			Type: elephas.EntityTypePerson,
+		},
+	}}}))
+
+	if _, err := service.Ingest(context.Background(), elephas.IngestRequest{RawText: "Charlie prefers dark mode."}); err == nil {
+		t.Fatalf("expected ingest to fail on store lookup error")
+	}
+
+	entities, err := store.ListEntities(context.Background(), elephas.EntityFilter{Limit: 10})
+	if err != nil {
+		t.Fatalf("list entities: %v", err)
+	}
+	if len(entities.Data) != 0 {
+		t.Fatalf("expected no entities to be created on lookup failure, got %d", len(entities.Data))
+	}
+}
+
 func TestServiceIngestValidationAndZeroCandidatePaths(t *testing.T) {
 	store, cleanup := newTestSQLiteStore(t)
 	defer cleanup()
@@ -205,6 +235,63 @@ func TestServiceIngestCreatesEntitiesAndRelationshipWithoutExplicitSubject(t *te
 	}
 	if len(entities.Data) != 2 {
 		t.Fatalf("expected 2 entities, got %d", len(entities.Data))
+	}
+}
+
+func TestServiceIngestInvalidatesExistingRelatedEntityContext(t *testing.T) {
+	store, cleanup := newTestSQLiteStore(t)
+	defer cleanup()
+
+	cache := &recordingCache{}
+	ctx := context.Background()
+
+	charlie, err := store.CreateEntity(ctx, elephas.CreateEntityParams{Name: "Charlie", Type: elephas.EntityTypePerson})
+	if err != nil {
+		t.Fatalf("create subject: %v", err)
+	}
+	weave, err := store.CreateEntity(ctx, elephas.CreateEntityParams{Name: "Weave", Type: elephas.EntityTypeOrganization})
+	if err != nil {
+		t.Fatalf("create related: %v", err)
+	}
+
+	service := elephas.NewService(store, elephas.WithContextCache(cache), elephas.WithExtractor(fakeExtractor{candidates: []elephas.CandidateMemory{
+		{
+			Content:    "Charlie works with Weave",
+			Category:   elephas.MemoryCategoryRelationship,
+			Confidence: 0.9,
+			Subject: &elephas.CandidateEntity{
+				Name: "Charlie",
+				Type: elephas.EntityTypePerson,
+			},
+			RelatedEntities: []elephas.CandidateEntity{
+				{Name: "Weave", Type: elephas.EntityTypeOrganization},
+			},
+			RelationshipType: "works_with",
+		},
+	}}))
+
+	if _, err := service.GetEntityContext(ctx, weave.ID, 1); err != nil {
+		t.Fatalf("prime related entity cache: %v", err)
+	}
+	if _, err := service.GetEntityContext(ctx, charlie.ID, 1); err != nil {
+		t.Fatalf("prime subject entity cache: %v", err)
+	}
+
+	response, err := service.Ingest(ctx, elephas.IngestRequest{RawText: "Charlie works with Weave."})
+	if err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	if response.RelationshipsCreated != 1 {
+		t.Fatalf("expected 1 relationship created, got %d", response.RelationshipsCreated)
+	}
+	if cache.deleteCount < 2 {
+		t.Fatalf("expected subject and related entity cache invalidation, got %d deletes", cache.deleteCount)
+	}
+	if _, ok := cache.values[cacheKey(charlie.ID, 1)]; ok {
+		t.Fatalf("expected subject entity cache to be invalidated")
+	}
+	if _, ok := cache.values[cacheKey(weave.ID, 1)]; ok {
+		t.Fatalf("expected related entity cache to be invalidated")
 	}
 }
 
@@ -440,6 +527,56 @@ func TestServiceIngestLogsAuditWarningWithRequestID(t *testing.T) {
 	}
 }
 
+func TestServiceIngestPersistsFinalResolutionPlanIDs(t *testing.T) {
+	store, cleanup := newTestSQLiteStore(t)
+	defer cleanup()
+
+	service := elephas.NewService(store, elephas.WithExtractor(fakeExtractor{candidates: []elephas.CandidateMemory{
+		{
+			Content:    "Works at Weave",
+			Category:   elephas.MemoryCategoryFact,
+			Confidence: 0.9,
+			Subject: &elephas.CandidateEntity{
+				Name: "Charlie",
+				Type: elephas.EntityTypePerson,
+			},
+			RelatedEntities: []elephas.CandidateEntity{
+				{Name: "Weave", Type: elephas.EntityTypeOrganization},
+			},
+			RelationshipType: "works_at",
+		},
+	}}))
+
+	response, err := service.Ingest(context.Background(), elephas.IngestRequest{
+		RawText: "Charlie works at Weave.",
+	})
+	if err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	if response.IngestSourceID == nil {
+		t.Fatalf("expected ingest source id")
+	}
+
+	source, err := store.GetIngestSource(context.Background(), *response.IngestSourceID)
+	if err != nil {
+		t.Fatalf("get ingest source: %v", err)
+	}
+	if len(source.ResolutionPlan.Steps) != 1 {
+		t.Fatalf("expected one persisted resolution step, got %d", len(source.ResolutionPlan.Steps))
+	}
+
+	step := source.ResolutionPlan.Steps[0]
+	if step.CreatedMemoryID == nil {
+		t.Fatalf("expected persisted resolution plan to include created memory id")
+	}
+	if len(step.CreatedEntityIDs) != 2 {
+		t.Fatalf("expected persisted resolution plan to include both created entity ids, got %d", len(step.CreatedEntityIDs))
+	}
+	if len(step.CreatedRelationID) != 1 {
+		t.Fatalf("expected persisted resolution plan to include created relationship id, got %d", len(step.CreatedRelationID))
+	}
+}
+
 func newTestSQLiteStore(t *testing.T) (*sqlstore.Store, func()) {
 	t.Helper()
 
@@ -466,6 +603,15 @@ type fakeExtractor struct {
 
 func (f fakeExtractor) Extract(_ context.Context, _ elephas.ExtractRequest) ([]elephas.CandidateMemory, error) {
 	return f.candidates, f.err
+}
+
+type lookupErrorStore struct {
+	*sqlstore.Store
+	err error
+}
+
+func (s lookupErrorStore) FindEntityByName(context.Context, string) (elephas.Entity, error) {
+	return elephas.Entity{}, s.err
 }
 
 type auditCreateFailureStore struct {

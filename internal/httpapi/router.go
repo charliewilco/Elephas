@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -575,7 +576,13 @@ func decodeJSON(req *http.Request, target any) error {
 	if err := decoder.Decode(target); err != nil {
 		return elephas.WrapError(elephas.ErrorCodeInvalidRequest, "invalid JSON body", err, nil)
 	}
-	return nil
+	if err := decoder.Decode(&struct{}{}); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		return elephas.WrapError(elephas.ErrorCodeInvalidRequest, "invalid JSON body", err, nil)
+	}
+	return elephas.NewError(elephas.ErrorCodeInvalidRequest, "invalid JSON body", nil)
 }
 
 func parseUUIDPath(req *http.Request, name string) (uuid.UUID, error) {

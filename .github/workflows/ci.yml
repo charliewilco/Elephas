@@ -142,6 +142,9 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Test with race detector
+        run: go test -race ./...
+
       - name: Vet
         run: go vet ./...
 
