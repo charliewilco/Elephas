@@ -23,6 +23,9 @@ build:
 test:
     go test ./...
 
+test-race:
+    go test -race ./...
+
 vet:
     go vet ./...
 
@@ -31,7 +34,7 @@ lint:
 
 check: fmt-check build test vet lint
 
-ci: tidy check
+ci: tidy check test-race
 
 run:
     go run ./cmd/elephas

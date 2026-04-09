@@ -40,7 +40,8 @@ Important boundary:
 - Store memories as typed nodes in a graph with first-class relationship edges.
 - Accept raw text via an ingest endpoint and return structured memories through an extraction
   pipeline.
-- Support create, read, update, and delete on individual memories with full audit metadata.
+- Support create, read, update, and delete on individual memories with ingest provenance when
+  audit recording succeeds.
 - Surface relevant memories given a query, using keyword and optional semantic search.
 - Provide a `Store` interface so the graph backend is swappable: Postgres (adjacency list) ships
   by default; Apache AGE (openCypher) is a supported alternative.
@@ -100,8 +101,8 @@ Important boundary:
      direct matches.
 
 7. `Config Layer`
-   - Reads configuration from environment variables and an optional config file.
-   - Exposes typed getters consumed by all other components.
+   - Reads configuration from environment variables and an optional local `.env` file.
+   - Exposes typed config values consumed by all other components.
    - Validates required values at startup.
 
 ### 3.2 Abstraction Levels
@@ -416,7 +417,7 @@ Raw Text
   → Audit     (persist the ingest source and resolution plan)
 ```
 
-Each stage is discrete. The pipeline returns the committed memories and the resolution plan.
+Each stage is discrete. The pipeline returns the committed memories and the final resolution plan.
 
 ### 6.2 Extract Stage
 
@@ -485,14 +486,15 @@ If the transaction fails, the pipeline returns the error. No partial state is co
 
 ### 6.5 Audit Stage
 
-After a successful commit, the pipeline writes an `IngestSource` record containing:
+After a successful commit, the pipeline attempts to write an `IngestSource` record containing:
 
 - The original `raw_text`
 - The `extractor_model` used
 - The serialized `ResolutionPlan`
 
 This is a best-effort write. If it fails, the pipeline logs a warning but does not roll back
-the committed memories.
+the committed memories. In that case the ingest response may still include committed memories
+while `ingest_source_id` remains absent.
 
 ### 6.6 Ingest Request and Response
 
@@ -741,9 +743,9 @@ Error codes map to HTTP status codes as follows:
 
 ### 8.1 Source and Precedence
 
-Configuration is read from environment variables only. No config file is required, but a
-`.env` file is supported for local development. Environment variables take precedence over
-`.env` file values.
+Configuration is read from environment variables and an optional local `.env` file.
+Environment variables take precedence over `.env` file values. No separate Elephas config
+file format is defined in v1.
 
 ### 8.2 Config Fields
 
@@ -1127,11 +1129,16 @@ If any write in the transaction fails, all writes roll back. The caller receives
 
 ### 14.3 Partial Availability
 
-If the cache backend (Redis) is unavailable, Elephas falls through to the store for every
-request and logs a warning. It does not return errors to callers due to cache unavailability.
+If the cache backend (Redis) is unavailable after startup, Elephas falls through to the store
+for every request and logs a warning. It does not return errors to callers due to cache
+unavailability.
 
 If the extractor endpoint is unavailable, only ingest requests fail. All read and direct
 write operations on memories, entities, and relationships are unaffected.
+
+If the best-effort ingest audit write fails after a successful commit, the committed memories
+remain durable and visible to callers, but the corresponding `IngestSource` record may be
+missing.
 
 ---
 
@@ -1199,4 +1206,3 @@ The following are intentional gaps left for post-v1 work:
 - `POST /v1/graph/path` endpoint
 - Per-request `extractor_model` override on ingest
 - `subject_external_id` resolution on ingest (look up entity by external ID)
-

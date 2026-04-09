@@ -440,6 +440,56 @@ func TestServiceIngestLogsAuditWarningWithRequestID(t *testing.T) {
 	}
 }
 
+func TestServiceIngestPersistsFinalResolutionPlanIDs(t *testing.T) {
+	store, cleanup := newTestSQLiteStore(t)
+	defer cleanup()
+
+	service := elephas.NewService(store, elephas.WithExtractor(fakeExtractor{candidates: []elephas.CandidateMemory{
+		{
+			Content:    "Works at Weave",
+			Category:   elephas.MemoryCategoryFact,
+			Confidence: 0.9,
+			Subject: &elephas.CandidateEntity{
+				Name: "Charlie",
+				Type: elephas.EntityTypePerson,
+			},
+			RelatedEntities: []elephas.CandidateEntity{
+				{Name: "Weave", Type: elephas.EntityTypeOrganization},
+			},
+			RelationshipType: "works_at",
+		},
+	}}))
+
+	response, err := service.Ingest(context.Background(), elephas.IngestRequest{
+		RawText: "Charlie works at Weave.",
+	})
+	if err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	if response.IngestSourceID == nil {
+		t.Fatalf("expected ingest source id")
+	}
+
+	source, err := store.GetIngestSource(context.Background(), *response.IngestSourceID)
+	if err != nil {
+		t.Fatalf("get ingest source: %v", err)
+	}
+	if len(source.ResolutionPlan.Steps) != 1 {
+		t.Fatalf("expected one persisted resolution step, got %d", len(source.ResolutionPlan.Steps))
+	}
+
+	step := source.ResolutionPlan.Steps[0]
+	if step.CreatedMemoryID == nil {
+		t.Fatalf("expected persisted resolution plan to include created memory id")
+	}
+	if len(step.CreatedEntityIDs) != 2 {
+		t.Fatalf("expected persisted resolution plan to include both created entity ids, got %d", len(step.CreatedEntityIDs))
+	}
+	if len(step.CreatedRelationID) != 1 {
+		t.Fatalf("expected persisted resolution plan to include created relationship id, got %d", len(step.CreatedRelationID))
+	}
+}
+
 func newTestSQLiteStore(t *testing.T) (*sqlstore.Store, func()) {
 	t.Helper()
 

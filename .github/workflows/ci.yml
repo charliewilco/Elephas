@@ -46,6 +46,9 @@ jobs:
       - name: Test
         run: go test ./...
 
+      - name: Test with race detector
+        run: go test -race ./...
+
       - name: Vet
         run: go vet ./...
 
