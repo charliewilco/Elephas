@@ -2,6 +2,7 @@ package elephas
 
 import (
 	"context"
+	"errors"
 	"sort"
 	"strings"
 	"unicode"
@@ -220,8 +221,14 @@ func (s *Service) Ingest(ctx context.Context, request IngestRequest) (IngestResp
 		// Invalidate all touched entities so future context reads are rebuilt from
 		// source-of-truth data after ingest commits.
 		s.invalidateEntityContext(ctx, derefEntityID(step.subjectExisting), derefCreatedEntityID(plan.entityRefs, step.subjectKey))
-		for _, key := range step.relatedKeys {
-			s.invalidateEntityContext(ctx, derefCreatedEntityID(plan.entityRefs, key))
+		if len(step.response.CreatedRelationID) > 0 {
+			relatedIDs := make([]uuid.UUID, 0, len(step.relatedKeys))
+			for _, key := range step.relatedKeys {
+				if ref := plan.entityRefs[key]; ref != nil {
+					relatedIDs = append(relatedIDs, derefEntityID(ref.existing))
+				}
+			}
+			s.invalidateEntityContext(ctx, relatedIDs...)
 		}
 	}
 
@@ -394,6 +401,11 @@ func (s *Service) resolveEntityRef(ctx context.Context, refs map[string]*entityR
 		ref := &entityRef{key: key, existing: &copyEntity}
 		refs[key] = ref
 		return ref, nil
+	} else {
+		var elephasErr *Error
+		if !errors.As(err, &elephasErr) || elephasErr.Code != ErrorCodeNotFound {
+			return nil, err
+		}
 	}
 
 	entityType := candidate.Type

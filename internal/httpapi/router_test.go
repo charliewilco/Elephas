@@ -130,6 +130,9 @@ func TestRouterAuthAndValidationFailures(t *testing.T) {
 	emptySearch.Header.Set("Authorization", "Bearer secret")
 	assertErrorResponse(t, serveRequest(handler, emptySearch), http.StatusBadRequest, elephas.ErrorCodeInvalidRequest)
 
+	trailingJSON := newAuthenticatedRequest(t, http.MethodPost, "/v1/entities", `{"name":"Delta","type":"person"}{"ignored":true}`)
+	assertErrorResponse(t, serveRequest(handler, trailingJSON), http.StatusBadRequest, elephas.ErrorCodeInvalidRequest)
+
 	notFound := newJSONRequest(t, http.MethodGet, "/v1/entities/"+uuid.NewString(), nil)
 	notFound.Header.Set("Authorization", "Bearer secret")
 	assertErrorResponse(t, serveRequest(handler, notFound), http.StatusNotFound, elephas.ErrorCodeNotFound)

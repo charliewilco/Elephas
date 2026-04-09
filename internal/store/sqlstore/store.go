@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/charliewilco/elephas"
 	"github.com/google/uuid"
@@ -533,18 +534,14 @@ func (s *Store) GetEntityContext(ctx context.Context, entityID uuid.UUID, depth 
 		return elephas.EntityContext{}, err
 	}
 
-	memoriesPage, err := s.ListMemories(ctx, elephas.MemoryFilter{
-		EntityID:       &entityID,
-		IncludeExpired: true,
-		Limit:          500,
-	})
+	memories, err := s.listAllMemoriesForEntity(ctx, entityID)
 	if err != nil {
 		return elephas.EntityContext{}, err
 	}
 
 	contextResult := elephas.EntityContext{
 		Entity:   entity,
-		Memories: memoriesPage.Data,
+		Memories: memories,
 	}
 
 	if depth <= 0 {
@@ -625,15 +622,12 @@ func (s *Store) FindPath(ctx context.Context, fromEntityID, toEntityID uuid.UUID
 			continue
 		}
 
-		page, err := s.ListRelationships(ctx, elephas.RelationshipFilter{
-			FromEntityID: &current,
-			Limit:        500,
-		})
+		relationships, err := s.listAllOutgoingRelationshipsForEntity(ctx, current)
 		if err != nil {
 			return nil, err
 		}
 
-		for _, relationship := range page.Data {
+		for _, relationship := range relationships {
 			next := relationship.ToEntityID
 			if _, seen := visited[next]; seen {
 				continue
@@ -811,6 +805,49 @@ func (s *Store) listRelationshipsForEntity(ctx context.Context, entityID uuid.UU
 	return scanRelationships(rows)
 }
 
+func (s *Store) listAllOutgoingRelationshipsForEntity(ctx context.Context, entityID uuid.UUID) ([]elephas.Relationship, error) {
+	const pageSize = 500
+
+	relationships := make([]elephas.Relationship, 0)
+	for offset := 0; ; offset += pageSize {
+		page, err := s.ListRelationships(ctx, elephas.RelationshipFilter{
+			FromEntityID: &entityID,
+			Limit:        pageSize,
+			Offset:       offset,
+		})
+		if err != nil {
+			return nil, err
+		}
+		relationships = append(relationships, page.Data...)
+		if len(page.Data) < pageSize {
+			break
+		}
+	}
+	return relationships, nil
+}
+
+func (s *Store) listAllMemoriesForEntity(ctx context.Context, entityID uuid.UUID) ([]elephas.Memory, error) {
+	const pageSize = 500
+
+	memories := make([]elephas.Memory, 0)
+	for offset := 0; ; offset += pageSize {
+		page, err := s.ListMemories(ctx, elephas.MemoryFilter{
+			EntityID:       &entityID,
+			IncludeExpired: true,
+			Limit:          pageSize,
+			Offset:         offset,
+		})
+		if err != nil {
+			return nil, err
+		}
+		memories = append(memories, page.Data...)
+		if len(page.Data) < pageSize {
+			break
+		}
+	}
+	return memories, nil
+}
+
 func (s *Store) memoryWhere(filter elephas.MemoryFilter) (string, []any) {
 	clauses := make([]string, 0, 4)
 	args := make([]any, 0, 4)
@@ -842,7 +879,7 @@ func (s *Store) searchQuery(query elephas.SearchQuery, limit int) (string, []any
 	clauses := make([]string, 0, 4)
 
 	if s.backend == "sqlite" {
-		args = append(args, query.Query)
+		args = append(args, sqliteFTSQuery(query.Query))
 		clauses = append(clauses, fmt.Sprintf("memories_fts MATCH %s", s.bind(len(args))))
 	} else {
 		args = append(args, query.Query)
@@ -893,6 +930,56 @@ func (s *Store) searchQuery(query elephas.SearchQuery, limit int) (string, []any
 		where,
 		s.bind(len(args)),
 	), args
+}
+
+func sqliteFTSQuery(query string) string {
+	terms := splitSearchTerms(query)
+	if len(terms) == 0 {
+		return `""`
+	}
+
+	parts := make([]string, 0, len(terms))
+	for _, term := range terms {
+		if term == "" {
+			continue
+		}
+		parts = append(parts, `"`+strings.ReplaceAll(term, `"`, `""`)+`"`)
+	}
+	return strings.Join(parts, " AND ")
+}
+
+func splitSearchTerms(query string) []string {
+	terms := make([]string, 0, 4)
+	var current strings.Builder
+	inQuotes := false
+
+	flush := func() {
+		if current.Len() == 0 {
+			return
+		}
+		terms = append(terms, strings.TrimSpace(current.String()))
+		current.Reset()
+	}
+
+	for _, r := range query {
+		switch {
+		case r == '"':
+			if inQuotes {
+				inQuotes = false
+				flush()
+				continue
+			}
+			flush()
+			inQuotes = true
+		case unicode.IsSpace(r) && !inQuotes:
+			flush()
+		default:
+			current.WriteRune(r)
+		}
+	}
+	flush()
+
+	return terms
 }
 
 func (s *Store) simpleCount(ctx context.Context, table string) (int64, error) {
