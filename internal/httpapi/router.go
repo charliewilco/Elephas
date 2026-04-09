@@ -28,6 +28,8 @@ type readinessChecker interface {
 }
 
 func New(service *elephas.Service, cfg config.Config, logger *slog.Logger, readiness readinessChecker) http.Handler {
+	// Routes are grouped by resource (health, memories, entities, relationships,
+	// ingest, graph) to mirror service capabilities and keep handler discovery easy.
 	router := &Router{
 		service:   service,
 		config:    cfg,
@@ -67,6 +69,10 @@ func New(service *elephas.Service, cfg config.Config, logger *slog.Logger, readi
 }
 
 func (r *Router) withMiddleware(next http.Handler) http.Handler {
+	// Middleware order is intentional:
+	//   requestID runs outermost so every log and response has an ID,
+	//   logging wraps auth + handlers to include final status,
+	//   auth runs innermost and rejects unauthorized requests before handlers.
 	return r.requestID(r.logging(r.auth(next)))
 }
 
@@ -83,6 +89,7 @@ func (r *Router) requestID(next http.Handler) http.Handler {
 
 func (r *Router) auth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		// Empty API key means auth is disabled (local/dev default).
 		if r.config.Server.APIKey == "" {
 			next.ServeHTTP(w, req)
 			return

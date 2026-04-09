@@ -10,8 +10,12 @@ import (
 )
 
 type ingestPlan struct {
-	steps         []plannedStep
-	entityRefs    map[string]*entityRef
+	// steps is the ordered execution plan produced by resolution.
+	steps []plannedStep
+	// entityRefs tracks all entities mentioned by candidates so they can be
+	// resolved once and reused across memory/relationship operations.
+	entityRefs map[string]*entityRef
+	// relationships are deduplicated by canonical key before persistence.
 	relationships map[string]*relationshipPlan
 }
 
@@ -39,6 +43,10 @@ type relationshipPlan struct {
 }
 
 func (s *Service) Ingest(ctx context.Context, request IngestRequest) (IngestResponse, error) {
+	// Ingest is a 3-phase pipeline:
+	//   1) validate + extract candidate memories from text
+	//   2) build an in-memory resolution plan (pure computation)
+	//   3) optionally commit the plan in a transaction, then audit + invalidate cache
 	startedAt := s.now()
 	ingestLogger := s.loggerFor(ctx, "ingest")
 	extractorLogger := s.loggerFor(ctx, "extractor")
@@ -60,6 +68,8 @@ func (s *Service) Ingest(ctx context.Context, request IngestRequest) (IngestResp
 		RawText: request.RawText,
 		Model:   request.ExtractorModel,
 	}
+	// Passing the explicit subject name helps extractor prompts ground pronouns
+	// and implicit references around a known person/entity.
 	if subjectEntity != nil {
 		extractRequest.SubjectEntityName = subjectEntity.Name
 	}
@@ -143,6 +153,7 @@ func (s *Service) Ingest(ctx context.Context, request IngestRequest) (IngestResp
 	)
 
 	if request.DryRun {
+		// Dry-run exits before any writes; counts still reflect intended actions.
 		ingestLogger.Info("ingest completed",
 			"ingest_source_id", nil,
 			"subject_entity_id", nullableUUIDString(subjectID),
@@ -158,6 +169,8 @@ func (s *Service) Ingest(ctx context.Context, request IngestRequest) (IngestResp
 	}
 
 	var committed []Memory
+	// Persist entities, relationships, and memories in one transaction so the
+	// ingest result is all-or-nothing.
 	if err := s.store.RunInTx(ctx, func(ctx context.Context, tx Store) error {
 		if err := createPlannedEntities(ctx, tx, plan); err != nil {
 			return err
@@ -204,6 +217,8 @@ func (s *Service) Ingest(ctx context.Context, request IngestRequest) (IngestResp
 	}
 
 	for _, step := range plan.steps {
+		// Invalidate all touched entities so future context reads are rebuilt from
+		// source-of-truth data after ingest commits.
 		s.invalidateEntityContext(ctx, derefEntityID(step.subjectExisting), derefCreatedEntityID(plan.entityRefs, step.subjectKey))
 		for _, key := range step.relatedKeys {
 			s.invalidateEntityContext(ctx, derefCreatedEntityID(plan.entityRefs, key))

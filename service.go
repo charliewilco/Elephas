@@ -7,17 +7,31 @@ import (
 )
 
 type Service struct {
-	store            Store
-	extractor        Extractor
-	cache            ContextCache
-	logger           *slog.Logger
+	// store is the authoritative persistence layer for all entities, memories,
+	// relationships, and ingest audit records.
+	store Store
+	// extractor converts free-form text into structured candidate memories
+	// during ingest. It is optional for CRUD-only deployments.
+	extractor Extractor
+	// cache stores precomputed entity context views. The service treats cache
+	// failures as non-fatal and falls back to the store.
+	cache ContextCache
+	// logger emits structured operational logs for API and ingest workflows.
+	logger *slog.Logger
+	// resolveThreshold is the minimum resolver confidence to auto-merge
+	// extracted candidates with existing memories.
 	resolveThreshold float64
-	now              func() time.Time
+	// now is injected for deterministic tests and timing measurements.
+	now func() time.Time
 }
 
 type ServiceOption func(*Service)
 
 func NewService(store Store, opts ...ServiceOption) *Service {
+	// Defaults are intentionally safe:
+	//   - no extractor means ingest is unavailable but CRUD still works
+	//   - conservative resolution threshold avoids aggressive merges
+	//   - UTC clock keeps timestamps consistent across backends
 	svc := &Service{
 		store:            store,
 		logger:           slog.Default(),
@@ -73,6 +87,7 @@ func (s *Service) Ping(ctx context.Context) error {
 }
 
 func (s *Service) Close() error {
+	// Close cache first so no cache writes happen after store shutdown.
 	if s.cache != nil {
 		if err := s.cache.Close(); err != nil {
 			return err
