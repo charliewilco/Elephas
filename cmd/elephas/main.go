@@ -25,6 +25,9 @@ import (
 )
 
 func main() {
+	// Bootstrap order:
+	//   config -> store -> migrations -> optional reconciler -> service -> HTTP server.
+	// Each step fails fast because later stages depend on earlier initialization.
 	logger := observability.NewLogger(slog.LevelInfo)
 	slog.SetDefault(logger)
 
@@ -60,6 +63,7 @@ func main() {
 	}
 
 	if cfg.Extraction.Endpoint != "" {
+		// Extractor is optional; when absent the API still supports manual CRUD.
 		extractor := openai.New(openai.Config{
 			Endpoint:      cfg.Extraction.Endpoint,
 			APIKey:        cfg.Extraction.APIKey,
@@ -71,6 +75,7 @@ func main() {
 	}
 
 	if cfg.Cache.DSN != "" {
+		// Cache is a best-effort acceleration layer for entity-context responses.
 		cache, err := rediscache.New(ctx, cfg.Cache.DSN, cfg.Cache.TTL)
 		if err != nil {
 			fatalBootstrap(logger, "open redis cache", err, os.Exit)
@@ -94,6 +99,7 @@ func main() {
 	}
 
 	go func() {
+		// Graceful shutdown gives in-flight requests a bounded window to complete.
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
