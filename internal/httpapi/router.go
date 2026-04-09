@@ -70,9 +70,9 @@ func New(service *elephas.Service, cfg config.Config, logger *slog.Logger, readi
 
 func (r *Router) withMiddleware(next http.Handler) http.Handler {
 	// Middleware order is intentional:
-	//   auth runs first to reject unauthorized requests early,
+	//   requestID runs outermost so every log and response has an ID,
 	//   logging wraps auth + handlers to include final status,
-	//   requestID runs outermost so every log and response has an ID.
+	//   auth runs innermost and rejects unauthorized requests before handlers.
 	return r.requestID(r.logging(r.auth(next)))
 }
 

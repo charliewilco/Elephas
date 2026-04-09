@@ -11,10 +11,10 @@ import (
 
 type ingestPlan struct {
 	// steps is the ordered execution plan produced by resolution.
-	steps         []plannedStep
+	steps []plannedStep
 	// entityRefs tracks all entities mentioned by candidates so they can be
 	// resolved once and reused across memory/relationship operations.
-	entityRefs    map[string]*entityRef
+	entityRefs map[string]*entityRef
 	// relationships are deduplicated by canonical key before persistence.
 	relationships map[string]*relationshipPlan
 }

@@ -9,20 +9,20 @@ import (
 type Service struct {
 	// store is the authoritative persistence layer for all entities, memories,
 	// relationships, and ingest audit records.
-	store            Store
+	store Store
 	// extractor converts free-form text into structured candidate memories
 	// during ingest. It is optional for CRUD-only deployments.
-	extractor        Extractor
+	extractor Extractor
 	// cache stores precomputed entity context views. The service treats cache
 	// failures as non-fatal and falls back to the store.
-	cache            ContextCache
+	cache ContextCache
 	// logger emits structured operational logs for API and ingest workflows.
-	logger           *slog.Logger
+	logger *slog.Logger
 	// resolveThreshold is the minimum resolver confidence to auto-merge
 	// extracted candidates with existing memories.
 	resolveThreshold float64
 	// now is injected for deterministic tests and timing measurements.
-	now              func() time.Time
+	now func() time.Time
 }
 
 type ServiceOption func(*Service)
