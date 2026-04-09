@@ -197,9 +197,10 @@ func (s *Service) Ingest(ctx context.Context, request IngestRequest) (IngestResp
 		return IngestResponse{}, err
 	}
 
-	response.IngestSourceID, committed = s.auditIngest(ctx, request, subjectID, extractorModel, response.ResolutionPlan, committed)
+	finalPlan := ResolutionPlan{Steps: flattenSteps(plan.steps)}
+	response.IngestSourceID, committed = s.auditIngest(ctx, request, subjectID, extractorModel, finalPlan, committed)
 	response.CommittedMemories = committed
-	response.ResolutionPlan = ResolutionPlan{Steps: flattenSteps(plan.steps)}
+	response.ResolutionPlan = finalPlan
 	response.MemoriesCreated = 0
 	response.MemoriesUpdated = 0
 	response.MemoriesMerged = 0

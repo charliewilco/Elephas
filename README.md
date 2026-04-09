@@ -18,7 +18,8 @@ Elephas models durable memory as a graph:
 
 Current API capabilities include:
 
-- CRUD for memories, entities, and relationships
+- Create/read/update/delete for memories and entities
+- Create/read/delete/list for relationships
 - Memory search
 - Entity context retrieval
 - Graph path lookup
@@ -54,6 +55,7 @@ The codebase is organized around a small service layer and swappable storage bac
 ### 1. Configure local development
 
 Elephas reads environment variables directly and also loads a local `.env` file if present.
+There is no separate config file format.
 
 For the fastest local setup, use SQLite:
 
@@ -63,6 +65,12 @@ ELEPHAS_DB_BACKEND=sqlite
 ELEPHAS_DB_DSN=file:elephas.db
 ELEPHAS_HTTP_PORT=8080
 EOF
+```
+
+Or start from the included sample:
+
+```bash
+cp .env.example .env
 ```
 
 ### 2. Run the server
@@ -153,6 +161,14 @@ gofmt -w .
 
 `just lint` expects `staticcheck` at `$(go env GOPATH)/bin/staticcheck`.
 
+Additional useful checks:
+
+```bash
+go test -race ./...
+go test ./... -coverprofile=coverage.out
+go tool cover -func=coverage.out
+```
+
 ## API Overview
 
 Base path: `/v1`
@@ -199,6 +215,49 @@ If `ELEPHAS_API_KEY` is set, include:
 ```bash
 Authorization: Bearer <token>
 ```
+
+## API Reference
+
+### Common error envelope
+
+All non-success responses use:
+
+```json
+{
+  "error": {
+    "code": "string",
+    "message": "string",
+    "details": {}
+  }
+}
+```
+
+### Selected request and response shapes
+
+| Endpoint | Request body | Success response |
+|----------|--------------|------------------|
+| `POST /v1/entities` | `name`, `type`, optional `external_id`, optional `metadata` | `201` with full `Entity` |
+| `PATCH /v1/entities/{id}` | partial patch of `name`, `type`, `external_id`, `metadata` | `200` with updated `Entity` |
+| `POST /v1/memories` | `entity_id`, `content`, `category`, optional `confidence`, optional `expires_at`, optional `metadata` | `201` with full `Memory` |
+| `PATCH /v1/memories/{id}` | partial patch of `content`, `confidence`, `expires_at`, `metadata` | `200` with updated `Memory` |
+| `POST /v1/memories/search` | `q`, optional `entity_id`, optional `categories`, optional `include_expired`, optional `include_entity_context`, optional `limit` | `200` with `[]MemorySearchResult` |
+| `POST /v1/relationships` | `from_entity_id`, `to_entity_id`, `type`, optional `weight`, optional `metadata` | `201` with full `Relationship` |
+| `POST /v1/ingest` | `raw_text`, optional `subject_entity_id`, optional `subject_external_id`, optional `extractor_model`, optional `dry_run` | `200` with `IngestResponse` |
+| `POST /v1/graph/path` | `from_entity_id`, `to_entity_id`, `max_depth` | `200` with `{ "path": [...], "found": bool }` |
+
+`IngestResponse` includes:
+
+- `ingest_source_id` when audit recording succeeds and `dry_run` is false
+- `memories_created`, `memories_updated`, `memories_merged`, `memories_no_op`
+- `entities_created`, `relationships_created`
+- `resolution_plan`
+- `committed_memories`
+
+`GET /v1/ingest/{id}` returns the stored ingest audit record, including the final committed
+resolution plan with any created entity, relationship, and memory IDs.
+
+`GET /v1/ready` returns `200` only when the database is reachable and migrations are current.
+It returns `503` when the store is unavailable or migrations are stale.
 
 ## Example Requests
 
@@ -270,7 +329,33 @@ curl -X POST http://localhost:8080/v1/graph/path \
 
 - Ingest requires a configured extractor. Without `ELEPHAS_EXTRACTOR_ENDPOINT` and `ELEPHAS_EXTRACTOR_API_KEY`, `POST /v1/ingest` will return an extractor-unavailable error.
 - Migrations run automatically on startup.
-- SQLite is the easiest backend for local development; Postgres or AGE are better fits for deployed environments.
+- SQLite is the easiest backend for local development; Postgres is the default production backend.
+- AGE support exists, but automated coverage is currently lighter than SQLite and core SQL-store coverage.
+- Redis is a best-effort cache. If Redis is unavailable after startup, Elephas logs cache errors and falls back to the store for entity-context reads.
+- Ingest audit is best-effort after the main write transaction commits. A successful ingest can still return committed memories even if the audit record could not be stored.
+
+## Testing
+
+Default local verification:
+
+```bash
+just check
+go test -race ./...
+```
+
+Optional backend-specific test setup:
+
+- `ELEPHAS_TEST_POSTGRES_DSN` enables the Postgres backend smoke tests.
+- `ELEPHAS_TEST_AGE_DSN` enables the AGE backend smoke tests.
+- `redis-server` on `PATH` enables the Redis cache integration tests.
+
+Recommended support tiers today:
+
+- SQLite: strongest local and automated coverage
+- Postgres: supported, but integration coverage is lighter unless you run DSN-backed tests
+- AGE: implemented, but currently the least validated backend in automated coverage
+
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for the contributor workflow and backend test notes.
 
 ## Status
 
