@@ -32,9 +32,12 @@ vet:
 lint:
     "$(go env GOPATH)/bin/staticcheck" ./...
 
+govulncheck:
+    "$(go env GOPATH)/bin/govulncheck" ./...
+
 check: fmt-check build test vet lint
 
-ci: tidy check test-race
+ci: tidy check test-race govulncheck
 
 run:
     go run ./cmd/elephas
