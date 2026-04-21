@@ -360,3 +360,7 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for the contributor workflow and backen
 ## Status
 
 The repository includes a draft product spec in [`SPEC.md`](./SPEC.md). The implementation already covers the core service, HTTP API, ingest flow, migrations, and multiple storage backends, but the spec is broader than a minimal getting-started guide, so the README focuses on what is implemented in this codebase today.
+
+## License
+
+This project is released under the [The Unlicense](./UNLICENSE).
