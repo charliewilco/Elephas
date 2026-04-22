@@ -88,17 +88,36 @@ func TestRouterAuthAndValidationFailures(t *testing.T) {
 	handler, cleanup := newTestRouter(t, "secret", fakeExtractor{})
 	defer cleanup()
 
-	unauthorized := serveRequest(handler, newRequest(t, http.MethodGet, "/v1/health", nil))
-	assertErrorResponse(t, unauthorized, http.StatusBadRequest, elephas.ErrorCodeInvalidRequest)
+	health := serveRequest(handler, newRequest(t, http.MethodGet, "/v1/health", nil))
+	if health.Code != http.StatusOK {
+		t.Fatalf("expected public health probe to return 200, got %d", health.Code)
+	}
+	assertStatusField(t, health.Body.Bytes(), "ok")
+
+	ready := serveRequest(handler, newRequest(t, http.MethodGet, "/v1/ready", nil))
+	if ready.Code != http.StatusOK {
+		t.Fatalf("expected public ready probe to return 200, got %d", ready.Code)
+	}
+	assertStatusField(t, ready.Body.Bytes(), "ready")
+
+	unauthorized := serveRequest(handler, newRequest(t, http.MethodGet, "/v1/stats", nil))
+	assertErrorResponse(t, unauthorized, http.StatusUnauthorized, elephas.ErrorCodeInvalidRequest)
+	assertBearerChallenge(t, unauthorized)
 	if got := unauthorized.Header().Get("X-Request-ID"); got == "" {
 		t.Fatalf("expected request id to be set on unauthorized response")
 	}
 
-	authorized := newRequest(t, http.MethodGet, "/v1/health", nil)
+	badToken := newRequest(t, http.MethodGet, "/v1/stats", nil)
+	badToken.Header.Set("Authorization", "Bearer wrong")
+	badTokenResponse := serveRequest(handler, badToken)
+	assertErrorResponse(t, badTokenResponse, http.StatusUnauthorized, elephas.ErrorCodeInvalidRequest)
+	assertBearerChallenge(t, badTokenResponse)
+
+	authorized := newRequest(t, http.MethodGet, "/v1/stats", nil)
 	authorized.Header.Set("Authorization", "Bearer secret")
 	ok := serveRequest(handler, authorized)
 	if ok.Code != http.StatusOK {
-		t.Fatalf("expected authorized request to succeed, got %d", ok.Code)
+		t.Fatalf("expected authorized stats request to succeed, got %d", ok.Code)
 	}
 
 	badEntity := newJSONRequest(t, http.MethodPost, "/v1/entities", map[string]any{
@@ -532,6 +551,13 @@ func assertErrorResponse(t *testing.T, rr *httptest.ResponseRecorder, expectedSt
 	}
 	if strings.TrimSpace(payload.Error.Message) == "" {
 		t.Fatalf("expected error message to be populated")
+	}
+}
+
+func assertBearerChallenge(t *testing.T, rr *httptest.ResponseRecorder) {
+	t.Helper()
+	if got := rr.Header().Get("WWW-Authenticate"); got != "Bearer" {
+		t.Fatalf("expected WWW-Authenticate header %q, got %q", "Bearer", got)
 	}
 }
 

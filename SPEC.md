@@ -775,7 +775,7 @@ file format is defined in v1.
 - `ELEPHAS_HTTP_WRITE_TIMEOUT_MS` (integer)
   - Default: `30000`
 - `ELEPHAS_API_KEY` (string, optional)
-  - When set, all API requests must include `Authorization: Bearer <key>`.
+  - When set, all API requests except `/v1/health` and `/v1/ready` must include `Authorization: Bearer <key>`.
   - When absent, authentication is disabled.
 
 #### Extraction
@@ -1081,6 +1081,10 @@ Error logs include:
 
 `GET /v1/ready` — returns `200 OK` only if the database connection pool is healthy and
 migrations are current. Returns `503 Service Unavailable` otherwise.
+
+These probe endpoints remain unauthenticated even when `ELEPHAS_API_KEY` is set. Other
+endpoints require a valid bearer token and return `401 Unauthorized` with
+`WWW-Authenticate: Bearer` when the token is missing or invalid.
 
 ### 13.3 Request IDs
 
