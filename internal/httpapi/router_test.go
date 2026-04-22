@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -359,6 +360,112 @@ func TestRouterIngestSearchContextPathAndIngestSourceLookup(t *testing.T) {
 	if len(pathResponse.Path) == 0 {
 		t.Fatalf("expected path response to include nodes")
 	}
+}
+
+func TestDecodeEntityPatchParsesFields(t *testing.T) {
+	body := map[string]json.RawMessage{
+		"name":        json.RawMessage(`"Updated Name"`),
+		"type":        json.RawMessage(`"organization"`),
+		"external_id": json.RawMessage(`null`),
+		"metadata":    json.RawMessage(`{"source":"api"}`),
+	}
+
+	patch, err := decodeEntityPatch(body)
+	if err != nil {
+		t.Fatalf("decode entity patch: %v", err)
+	}
+
+	if patch.Name == nil || *patch.Name != "Updated Name" {
+		t.Fatalf("expected name to be set")
+	}
+	if patch.Type == nil || *patch.Type != elephas.EntityTypeOrganization {
+		t.Fatalf("expected type to be organization, got %#v", patch.Type)
+	}
+	if patch.ExternalID != nil || !patch.ClearExternalID {
+		t.Fatalf("expected external_id to be cleared")
+	}
+	if !patch.SetMetadata || patch.Metadata["source"] != "api" {
+		t.Fatalf("expected metadata to be set")
+	}
+}
+
+func TestDecodeEntityPatchRejectsInvalidType(t *testing.T) {
+	body := map[string]json.RawMessage{
+		"type": json.RawMessage(`123`),
+	}
+
+	_, err := decodeEntityPatch(body)
+	if err == nil {
+		t.Fatalf("expected error for invalid type")
+	}
+	var apiErr *elephas.Error
+	if !errors.As(err, &apiErr) || apiErr.Code != elephas.ErrorCodeInvalidRequest {
+		t.Fatalf("expected invalid_request error, got %#v", err)
+	}
+}
+
+func TestHandleUpdateEntityAppliesPatch(t *testing.T) {
+	handler, cleanup := newTestRouter(t, "", fakeExtractor{})
+	defer cleanup()
+
+	entity := createEntityViaAPI(t, handler, map[string]any{
+		"name":        "Delta",
+		"type":        "person",
+		"external_id": "user-789",
+	})
+
+	req := newAuthenticatedRequest(t, http.MethodPatch, "/v1/entities/"+entity.ID.String(), map[string]any{
+		"name":        "Echo",
+		"type":        "organization",
+		"external_id": nil,
+		"metadata":    map[string]any{"updated": true},
+	})
+	rr := serveRequest(handler, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected update to return 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var patched elephas.Entity
+	decodeResponse(t, rr.Body.Bytes(), &patched)
+	if patched.Name != "Echo" {
+		t.Fatalf("expected name to update, got %q", patched.Name)
+	}
+	if patched.Type != elephas.EntityTypeOrganization {
+		t.Fatalf("expected type to change, got %s", patched.Type)
+	}
+	if patched.ExternalID != nil {
+		t.Fatalf("expected external_id to be cleared, got %v", patched.ExternalID)
+	}
+	if patched.Metadata["updated"] != true {
+		t.Fatalf("expected metadata to be set, got %#v", patched.Metadata)
+	}
+
+	fetchReq := newAuthenticatedRequest(t, http.MethodGet, "/v1/entities/"+entity.ID.String(), nil)
+	fetched := serveRequest(handler, fetchReq)
+	if fetched.Code != http.StatusOK {
+		t.Fatalf("expected get entity to return 200, got %d: %s", fetched.Code, fetched.Body.String())
+	}
+	var fetchedEntity elephas.Entity
+	decodeResponse(t, fetched.Body.Bytes(), &fetchedEntity)
+	if fetchedEntity.Name != patched.Name || fetchedEntity.Type != patched.Type || fetchedEntity.ExternalID != nil {
+		t.Fatalf("expected persisted patch, got %+v", fetchedEntity)
+	}
+}
+
+func TestHandleUpdateEntityRejectsInvalidPatch(t *testing.T) {
+	handler, cleanup := newTestRouter(t, "", fakeExtractor{})
+	defer cleanup()
+
+	entity := createEntityViaAPI(t, handler, map[string]any{
+		"name":        "Foxtrot",
+		"type":        "person",
+		"external_id": "user-321",
+	})
+
+	req := newAuthenticatedRequest(t, http.MethodPatch, "/v1/entities/"+entity.ID.String(), map[string]any{
+		"name": "",
+	})
+	assertErrorResponse(t, serveRequest(handler, req), http.StatusBadRequest, elephas.ErrorCodeInvalidRequest)
 }
 
 func TestRouterIngestRequestLoggingIncludesRequestID(t *testing.T) {
