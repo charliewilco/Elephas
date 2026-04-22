@@ -94,7 +94,7 @@ The server will start on `http://localhost:8080` by default.
 ```bash
 curl http://localhost:8080/v1/health
 curl http://localhost:8080/v1/ready
-curl http://localhost:8080/v1/stats
+curl -H "Authorization: Bearer ${ELEPHAS_API_KEY}" http://localhost:8080/v1/stats
 ```
 
 ## Common Configuration
@@ -112,7 +112,7 @@ curl http://localhost:8080/v1/stats
 - `ELEPHAS_HTTP_PORT`
 - `ELEPHAS_HTTP_READ_TIMEOUT_MS`
 - `ELEPHAS_HTTP_WRITE_TIMEOUT_MS`
-- `ELEPHAS_API_KEY` - optional bearer token required on every request when set
+- `ELEPHAS_API_KEY` - optional bearer token required on all endpoints except `/v1/health` and `/v1/ready` when set
 
 ### Extractor
 
@@ -216,6 +216,10 @@ If `ELEPHAS_API_KEY` is set, include:
 Authorization: Bearer <token>
 ```
 
+Requests that omit or provide an invalid bearer token receive `401 Unauthorized` with
+`WWW-Authenticate: Bearer`. The `/v1/health` and `/v1/ready` probe endpoints stay public
+even when bearer auth is enabled.
+
 ## API Reference
 
 ### Common error envelope
@@ -258,6 +262,10 @@ resolution plan with any created entity, relationship, and memory IDs.
 
 `GET /v1/ready` returns `200` only when the database is reachable and migrations are current.
 It returns `503` when the store is unavailable or migrations are stale.
+
+`GET /v1/health` and `GET /v1/ready` do not require `Authorization`, even when
+`ELEPHAS_API_KEY` is set. Other endpoints, including `GET /v1/stats`, require a valid
+bearer token when auth is enabled.
 
 ## Example Requests
 

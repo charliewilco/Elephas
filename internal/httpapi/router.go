@@ -90,20 +90,38 @@ func (r *Router) requestID(next http.Handler) http.Handler {
 
 func (r *Router) auth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if isPublicProbePath(req.URL.Path) {
+			next.ServeHTTP(w, req)
+			return
+		}
+
 		// Empty API key means auth is disabled (local/dev default).
 		if r.config.Server.APIKey == "" {
 			next.ServeHTTP(w, req)
 			return
 		}
 
-		token := strings.TrimPrefix(req.Header.Get("Authorization"), "Bearer ")
-		if token != r.config.Server.APIKey {
-			writeError(w, req, r.logger, http.StatusBadRequest, elephas.NewError(elephas.ErrorCodeInvalidRequest, "missing or invalid bearer token", nil))
+		token, ok := bearerToken(req.Header.Get("Authorization"))
+		if !ok || token != r.config.Server.APIKey {
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			writeError(w, req, r.logger, http.StatusUnauthorized, elephas.NewError(elephas.ErrorCodeInvalidRequest, "missing or invalid bearer token", nil))
 			return
 		}
 
 		next.ServeHTTP(w, req)
 	})
+}
+
+func isPublicProbePath(path string) bool {
+	return path == "/v1/health" || path == "/v1/ready"
+}
+
+func bearerToken(header string) (string, bool) {
+	scheme, token, ok := strings.Cut(header, " ")
+	if !ok || !strings.EqualFold(scheme, "Bearer") || strings.TrimSpace(token) == "" {
+		return "", false
+	}
+	return token, true
 }
 
 func (r *Router) logging(next http.Handler) http.Handler {
